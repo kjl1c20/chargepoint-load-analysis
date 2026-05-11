@@ -1,0 +1,9 @@
+python-dotenv
+pandas
+matplotlib
+seaborn
+pandas
+folium
+ipykernel
+pyiceberg
+pyarrow

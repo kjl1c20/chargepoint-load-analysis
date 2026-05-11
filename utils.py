@@ -1,19 +1,29 @@
-from pyiceberg.catalog import load_catalog
-# Replace these with your actual credentials
-SENSE_CLIENT_ID = "dd75cc7d1cea8981"
-SENSE_CLIENT_SECRET = "7ccd813c28ea32d45c6045a7df4901ea"
+import os
+from pathlib import Path
 
-# The SENSE catalog URL
+from dotenv import load_dotenv
+from pyiceberg.catalog import load_catalog
+
+load_dotenv(Path(__file__).resolve().parent / ".env")
+
 SENSE_CATALOG_URL = "https://catalog.sdr-sense.org.uk/api/catalog"
 
 def connect_to_warehouse(warehouse_slug):
     """Connect to a specific SENSE organisation catalog."""
+    client_id = os.environ.get("SENSE_CLIENT_ID")
+    client_secret = os.environ.get("SENSE_CLIENT_SECRET")
+    if not client_id or not client_secret:
+        raise ValueError(
+            "Set SENSE_CLIENT_ID and SENSE_CLIENT_SECRET in .env "
+            "(or export them in the environment)."
+        )
+
     return load_catalog(
         "sense",
         **{
             "type": "rest",
             "uri": SENSE_CATALOG_URL,
-            "credential": f"{SENSE_CLIENT_ID}:{SENSE_CLIENT_SECRET}",
+            "credential": f"{client_id}:{client_secret}",
             "scope": "PRINCIPAL_ROLE:ALL",
             "warehouse": warehouse_slug,
         }
