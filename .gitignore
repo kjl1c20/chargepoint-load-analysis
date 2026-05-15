@@ -1,4 +1,5 @@
 Sense Python/
 .env
+.vscode
 __pycache__/
 substation_map.html
