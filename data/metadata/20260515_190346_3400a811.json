@@ -1,0 +1,33 @@
+{
+    "snapshot_id": "20260515_190346_3400a811",
+    "dataset_name": "scotland_chargepoint_sessions_table_sessions_enriched_with_simd",
+    "created_at": "2026-05-15T19:03:46.678370",
+    "data": {
+        "rows": 100000,
+        "columns": 14,
+        "column_names": [
+            "connector_id",
+            "cp_id",
+            "connector_type",
+            "consumption_kwh",
+            "duration",
+            "site",
+            "start_time",
+            "end_time",
+            "City",
+            "Postcode",
+            "PricePerKWh",
+            "Power_kW",
+            "latitude",
+            "longitude"
+        ]
+    },
+    "filters": {
+        "is_anomaly": false
+    },
+    "limit": 100000,
+    "storage": {
+        "format": "parquet",
+        "path": "data/raw/20260515_190346_3400a811.parquet"
+    }
+}
