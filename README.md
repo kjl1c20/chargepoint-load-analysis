@@ -31,10 +31,7 @@ Each region (or spatial cluster) is analysed over time to determine infrastructu
 
 ### Key Metric
 
-Utilisation rate is used as the main indicator of demand pressure:
-
-:contentReference[oaicite:0]{index=0}
-
+Utilisation rate is used as the main indicator of demand pressure.
 High utilisation indicates charger congestion and potential infrastructure shortage.
 
 ---
@@ -122,4 +119,4 @@ clone this repo
 
 pip install -r requirements.txt
 
-python src/models/train.py
+python train_model.py
