@@ -15,6 +15,7 @@ COPY . .
 # Create directories
 RUN mkdir -p data/raw
 RUN mkdir -p data/processed
+RUN mkdir -p data/metadata
 RUN mkdir -p models
     
     
@@ -22,4 +23,4 @@ RUN mkdir -p models
 EXPOSE 8501
 
 # Default command
-CMD ["streamlit", "run", "app/streamlit_app.py"]
+CMD ["streamlit", "run", "app/dashboard.py"]

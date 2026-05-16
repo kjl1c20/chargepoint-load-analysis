@@ -1,0 +1,33 @@
+name: CI Pipeline
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      # ----------------------------------------------------
+      # Checkout code
+      # ----------------------------------------------------
+      - uses: actions/checkout@v4
+
+      # ----------------------------------------------------
+      # Install dependencies (for smoke check)
+      # ----------------------------------------------------
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # ----------------------------------------------------
+      # Build Docker image
+      # ----------------------------------------------------
+      - name: Build Docker image
+        run: |
+          docker build -t scotland-chargepoint-load .

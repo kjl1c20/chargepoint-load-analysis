@@ -4,6 +4,9 @@ matplotlib
 seaborn
 pandas
 folium
+streamlit
+plotly
+streamlit-folium
 ipykernel
 pyiceberg
 pyarrow
