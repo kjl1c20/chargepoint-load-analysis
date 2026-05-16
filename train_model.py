@@ -93,7 +93,11 @@ cluster_features = (
 
           peak_hour=("hour", lambda x: x.mode()[0]),
 
-          weekend_ratio=("is_weekend", "mean")
+          weekend_ratio=("is_weekend", "mean"),
+
+          latitude=("latitude", "mean"),
+
+          longitude=("longitude", "mean")
       )
       .reset_index()
 )
@@ -121,11 +125,9 @@ cluster_features["energy_per_connector"] = (
 # ============================================================
 # target label defintion
 # ============================================================
-#
+
 # IMPORTANT:
-# Since we do NOT have true "needs chargers" labels,
-# we create a proxy target using demand pressure.
-#
+# create a proxy target using demand pressure.
 # High utilisation regions are labelled as:
 # 1 = needs more chargers
 
