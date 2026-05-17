@@ -3,11 +3,22 @@ import pandas as pd
 from datetime import datetime
 import uuid
 import json
+import logging
 from pathlib import Path
 from dotenv import load_dotenv
 from pyiceberg.catalog import load_catalog
 
-load_dotenv(Path(__file__).resolve().parent / ".env")
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s"
+)
+
+logger = logging.getLogger(__name__)
+
+
+
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 SENSE_CATALOG_URL = "https://catalog.sdr-sense.org.uk/api/catalog"
 RAW_DATA_DIR = Path("./data/raw")
@@ -96,9 +107,6 @@ def save_raw_snapshot(
     # -------------------------------------------------
     # LOGGING
     # -------------------------------------------------
-    print("✅ Snapshot saved")
-    print(f"📦 Snapshot ID: {snapshot_id}")
-    print(f"📂 Data: {parquet_path}")
-    print(f"📝 Metadata: {metadata_path}")
+    logger.info("Snapshot successfully saved | Snapshot ID: %s", snapshot_id)
 
     return snapshot_id
