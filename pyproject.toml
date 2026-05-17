@@ -1,5 +1,5 @@
 [project]
-name = "electricity-demand-forecasting"
+name = "chargepoint-load-analysis"
 version = "0.1.0"
 description = ""
 authors = [
