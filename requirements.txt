@@ -1,8 +1,5 @@
 python-dotenv
 pandas
-matplotlib
-seaborn
-pandas
 folium
 streamlit
 plotly
