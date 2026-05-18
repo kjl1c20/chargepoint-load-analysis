@@ -1,22 +1,23 @@
-[project]
+[tool.poetry]
 name = "chargepoint-load-analysis"
 version = "0.1.0"
-description = ""
-authors = [
-    {name = "kjl1c20",email = "kangjielee0920@gmail.com"}
-]
+description = "Production-grade machine learning pipeline analysing EV charging session data to model infrastructure load and identify regions under high charging demand pressure across Scotland."
+package-mode = false
+
+authors = ["Lee Kang Jie"]
 readme = "README.md"
-requires-python = ">=3.14,<4.0"
-dependencies = [
-    "xgboost (>=3.2.0,<4.0.0)",
-    "pandas (>=3.0.3,<4.0.0)",
-    "python-dotenv (>=1.2.2,<2.0.0)",
-    "scikit-learn (>=1.8.0,<2.0.0)",
-    "pyiceberg (>=0.11.1,<0.12.0)",
-    "streamlit (>=1.57.0,<2.0.0)",
-    "plotly (>=6.7.0,<7.0.0)",
-    "streamlit-folium (>=0.27.2,<0.28.0)"
-]
+
+[tool.poetry.dependencies]
+python = ">=3.14,<4.0"
+pandas = "^3.0.3"
+numpy = "^2.4.5"
+scikit-learn = "^1.8.0"
+xgboost = "^3.2.0"
+streamlit = "^1.57.0"
+python-dotenv = "^1.2.2"
+plotly = "^6.7.0"
+streamlit-folium = "^0.27.2"
+pyiceberg = "^0.11.1"
 
 
 [build-system]

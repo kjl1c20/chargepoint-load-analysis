@@ -1,6 +1,5 @@
 python-dotenv
 pandas
-folium
 streamlit
 plotly
 streamlit-folium
