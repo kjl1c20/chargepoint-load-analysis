@@ -110,3 +110,14 @@ def save_raw_snapshot(
     logger.info("Snapshot successfully saved | Snapshot ID: %s", snapshot_id)
 
     return snapshot_id
+
+
+def get_latest_snapshot_id():
+    files = list(Path(METADATA_DIR).glob("*.json"))
+
+    latest_file = max(files, key=lambda f: f.stat().st_mtime)
+
+    with open(latest_file, "r") as f:
+        metadata = json.load(f)
+
+    return metadata["snapshot_id"]

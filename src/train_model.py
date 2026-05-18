@@ -4,15 +4,16 @@ import numpy as np
 
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import classification_report, roc_auc_score
-from sklearn.ensemble import RandomForestClassifier
 
 import xgboost as xgb
+
+from utils import get_latest_snapshot_id
 
 # ============================================================
 # data loading
 # ============================================================
 
-snapshot_id = "20260515_190346_3400a811"
+snapshot_id = get_latest_snapshot_id() # HARD CODE SNAPSHOT ID IN STRING FOR HISTORICAL DATA
 DATA_PATH = f"./data/raw/{snapshot_id}.parquet"
 df = pd.read_parquet(DATA_PATH)
 
