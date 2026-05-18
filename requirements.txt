@@ -2,6 +2,7 @@ python-dotenv
 pandas
 streamlit
 plotly
+folium
 streamlit-folium
 ipykernel
 pyiceberg
