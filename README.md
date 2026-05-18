@@ -57,6 +57,14 @@ High utilisation indicates charger congestion and potential infrastructure short
 
 ## Methodology
 
+### 0.Initial Set Up
+- Create an account at Smart Energy Data Service from [here](https://sso.sdr-sense.org.uk/realms/sense/login-actions/registration?client_id=webapp&tab_id=vys0Y64tOKg&client_data=eyJydSI6Imh0dHBzOi8vZGF0YS5zZHItc2Vuc2Uub3JnLnVrL2xvZ2luL29hdXRoMi9jb2RlL2tleWNsb2FrIiwicnQiOiJjb2RlIiwic3QiOiJ6WjRLc1JuT3NQT3JBMFFDdUJ5cEgydTVqR1BLa21USnltQk56THpEcEpvPSJ9) to get your credential to harvest the data
+- Create `.env` file to store the credentials  
+```
+SENSE_CLIENT_ID=REPLACE_WITH_YOUR_ID
+SENSE_CLIENT_SECRET=REPLACE_WITH_YOUR_SECRET
+```
+
 ### 1. Data Processing
 - Clean raw session data
 - Handle missing/invalid records
@@ -90,8 +98,6 @@ Regions are labelled as “needs chargers” based on:
 - F1-score
 - ROC-AUC
 
-(Recall is especially important for detecting overloaded regions.)
-
 ---
 
 ## Outputs
@@ -114,9 +120,15 @@ Regions are labelled as “needs chargers” based on:
 
 ---
 
-## How to Run
-clone this repo
+## How to run locally via conda environment
+1. create new environment and activate it
+2. Run: `pip install -r requirements.txt` to install dependencies
+3. To reharvest the data, run `python src/harvester.py`
+4. To rerun the machine learning model, run `python src/train_model.py`
+5. To visualise the results, run `streamlit run src/dashboard.py`
 
-pip install -r requirements.txt
-
-python train_model.py
+## How to run locally via Poetry
+1. Run: `poetry install` to install dependencies
+2. To reharvest the data run `poetry run python src/harvester.py`
+3. To rerun the machine learning model, run `poetry run python src/train_model.py`
+5. To visualise the results, run `poetry run streamlit run src/dashboard.py`
