@@ -17,8 +17,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-
-load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+PROJECT_ROOT = Path.cwd()
+load_dotenv(PROJECT_ROOT / ".env")
 
 SENSE_CATALOG_URL = "https://catalog.sdr-sense.org.uk/api/catalog"
 RAW_DATA_DIR = Path("./data/raw")
