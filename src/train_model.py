@@ -1,21 +1,30 @@
 from pathlib import Path
 import pandas as pd
 import numpy as np
+import logging
 
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import classification_report, roc_auc_score
 
 import xgboost as xgb
 
-from utils import get_latest_snapshot_id
+from utils import get_latest_snapshot_id, load_data, PROCESSED_DATA_DIR
+
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s"
+)
+
+logger = logging.getLogger(__name__)
 
 # ============================================================
 # data loading
 # ============================================================
 
 snapshot_id = get_latest_snapshot_id() # HARD CODE SNAPSHOT ID IN STRING FOR HISTORICAL DATA
-DATA_PATH = f"./data/raw/{snapshot_id}.parquet"
-df = pd.read_parquet(DATA_PATH)
+df = load_data('raw', snapshot_id)
+
 
 # ============================================================
 # data cleaning
@@ -144,9 +153,7 @@ cluster_features["label"] = np.where(
     0
 )
 
-print("\nLabel Distribution:")
-print(cluster_features["label"].value_counts())
-
+logger.info(f"\nLabel Distribution:{cluster_features["label"].value_counts()}")
 
 # ============================================================
 # machine learning model set up
@@ -205,15 +212,13 @@ model.fit(X_train, y_train)
 preds = model.predict(X_test)
 probs = model.predict_proba(X_test)[:, 1]
 
-print("\n==============================")
-print("CLASSIFICATION REPORT")
-print("==============================\n")
+logger.info("\n==============================")
+logger.info("CLASSIFICATION REPORT")
+logger.info("==============================\n")
 
-print(classification_report(y_test, preds))
+logger.info(classification_report(y_test, preds))
 
-print("\nROC-AUC:")
-print(roc_auc_score(y_test, probs))
-
+logger.info(f"\nROC-AUC:{roc_auc_score(y_test, probs)}")
 
 # ============================================================
 # results
@@ -231,8 +236,7 @@ cluster_features = cluster_features.sort_values(
 # ============================================================
 # 11. SAVE RESULTS
 # ============================================================
-processed_dir = Path("./data/processed")
-result_path = (processed_dir
+result_path = (PROCESSED_DATA_DIR
                 / f"{snapshot_id}_result.parquet"
                 )
 cluster_features.to_parquet(
@@ -240,4 +244,4 @@ cluster_features.to_parquet(
     index=False
 )
 
-print("\nPredictions saved")
+logger.info("Model results saved")

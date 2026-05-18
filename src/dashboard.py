@@ -5,6 +5,7 @@ import plotly.graph_objects as go
 import folium
 from folium.plugins import HeatMap
 from streamlit_folium import st_folium
+from utils import get_latest_snapshot_id, load_data
 
 st.set_page_config(
     page_title="Scotland Charge Point Load Analysis",
@@ -12,17 +13,8 @@ st.set_page_config(
 )
 
 
-@st.cache_data
-def load_data():
-
-    df = pd.read_parquet(
-        "./data/processed/20260515_190346_3400a811_result.parquet" # HARDCODED INPUT
-    )
-
-    return df
-
-
-df = load_data()
+snapshot_id = get_latest_snapshot_id() # HARD CODE SNAPSHOT ID IN STRING FOR HISTORICAL DATA
+df = load_data('processed', snapshot_id)
 df = df.rename(columns={"cluster": "city"})
 
 st.title("Scotland Charge Point Load Analysis")

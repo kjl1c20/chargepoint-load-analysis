@@ -7,7 +7,7 @@ import logging
 from pathlib import Path
 from dotenv import load_dotenv
 from pyiceberg.catalog import load_catalog
-
+import streamlit as st
 
 logging.basicConfig(
     level=logging.INFO,
@@ -23,6 +23,8 @@ load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 SENSE_CATALOG_URL = "https://catalog.sdr-sense.org.uk/api/catalog"
 RAW_DATA_DIR = Path("./data/raw")
 METADATA_DIR = Path("./data/metadata")
+PROCESSED_DATA_DIR = Path("./data/processed")
+
 
 def connect_to_warehouse(warehouse_slug):
     """Connect to a specific SENSE organisation catalog."""
@@ -121,3 +123,42 @@ def get_latest_snapshot_id():
         metadata = json.load(f)
 
     return metadata["snapshot_id"]
+
+
+@st.cache_data
+def load_data(data_type: str, snapshot_id: str) -> pd.DataFrame:
+    """
+    Loads a dataset (raw or processed) for a given snapshot_id.
+
+    Parameters
+    ----------
+    data_type : str
+        Type of data to load. Must be either 'raw' or 'processed'.
+    snapshot_id : str
+        Snapshot identifier used for versioned parquet files.
+
+    Returns
+    -------
+    pd.DataFrame
+        Loaded dataset as a pandas DataFrame.
+    """
+
+    DIR_MAP = {
+        "raw": RAW_DATA_DIR,
+        "processed": PROCESSED_DATA_DIR,
+    }
+
+    if data_type not in DIR_MAP:
+        raise ValueError("data_type must be either 'raw' or 'processed'.")
+
+    directory = DIR_MAP[data_type]
+    
+    if data_type == 'processed':
+        file_path = directory / f"{snapshot_id}_result.parquet"
+    else:
+        file_path = directory / f"{snapshot_id}.parquet"
+
+    if not file_path.exists():
+        raise FileNotFoundError(f"{data_type.capitalize()} data not found: {file_path}")
+
+    return pd.read_parquet(file_path)
