@@ -18,8 +18,6 @@ catalog = connect_to_warehouse(organisation)
 tables = catalog.list_tables(datasets)
 table_name = tables[0] # HARD CODED: THERE IS ONLY ONE TABLE IN THIS DATASET
 
-rows_per_table = 100000
-frames = []
 
 table = catalog.load_table(table_name)
 
