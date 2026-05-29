@@ -8,6 +8,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 from pyiceberg.catalog import load_catalog
 import streamlit as st
+from ydata_profiling import ProfileReport
 
 logging.basicConfig(
     level=logging.INFO,
@@ -24,6 +25,7 @@ SENSE_CATALOG_URL = "https://catalog.sdr-sense.org.uk/api/catalog"
 RAW_DATA_DIR = Path("./data/raw")
 METADATA_DIR = Path("./data/metadata")
 PROCESSED_DATA_DIR = Path("./data/processed")
+EDA_DIR = Path("./data/eda")
 
 
 def connect_to_warehouse(warehouse_slug):
@@ -52,7 +54,8 @@ def save_raw_snapshot(
     df: pd.DataFrame,
     dataset_name: str,
     filters: dict = None,
-    limit = None
+    limit = None,
+    isminimal_eda = False
 ):
     """
     Save parquet snapshot + metadata manifest
@@ -75,6 +78,11 @@ def save_raw_snapshot(
         / f"{snapshot_id}.json"
     )
 
+    eda_path = (
+        EDA_DIR
+        /f"{snapshot_id}.html"
+    )
+
     # SAVE PARQUET
     df.to_parquet(parquet_path, index=False)
 
@@ -84,10 +92,17 @@ def save_raw_snapshot(
         "dataset_name": dataset_name,
         "created_at": datetime.now().isoformat(),
 
+        "date_range": {
+            "start": df["start_time"].min().isoformat(),
+            "end": df["start_time"].max().isoformat()
+        },
+
         "data": {
             "rows": int(df.shape[0]),
             "columns": int(df.shape[1]),
-            "column_names": list(df.columns)
+            "column_names": list(df.columns),
+            "duplicates": int(df.duplicated().sum()),
+            "duplicates_percent": float(df.duplicated().sum()/int(df.shape[0]))
         },
 
         "filters": filters or {},
@@ -106,10 +121,13 @@ def save_raw_snapshot(
     with open(metadata_path, "w") as f:
         json.dump(metadata, f, indent=4)
 
-    # -------------------------------------------------
-    # LOGGING
-    # -------------------------------------------------
     logger.info("Snapshot successfully saved | Snapshot ID: %s", snapshot_id)
+
+    # -------------------------------------------------
+    # GENERATE EXPLORATORY DATA ANALYSIS REPORT
+    # -------------------------------------------------
+    ProfileReport(df, minimal=isminimal_eda).to_file(eda_path)
+    logger.info("EDA Profile Report successfully saved | Snapshot ID: %s", snapshot_id)
 
     return snapshot_id
 
