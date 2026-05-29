@@ -153,7 +153,7 @@ def save_clean_snapshot(df: pd.DataFrame, raw_snapshot_id: str, cleaning_report:
 
 
 def get_latest_snapshot_id():
-    files = list(Path(METADATA_DIR).glob("*.json"))
+    files = [f for f in Path(METADATA_DIR).glob("*.json") if not f.name.endswith("_clean.json")]
 
     latest_file = max(files, key=lambda f: f.stat().st_mtime)
 
