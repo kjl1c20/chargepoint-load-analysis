@@ -23,6 +23,7 @@ load_dotenv(PROJECT_ROOT / ".env")
 
 SENSE_CATALOG_URL = "https://catalog.sdr-sense.org.uk/api/catalog"
 RAW_DATA_DIR = Path("./data/raw")
+CLEAN_DATA_DIR = Path("./data/clean")
 METADATA_DIR = Path("./data/metadata")
 PROCESSED_DATA_DIR = Path("./data/processed")
 EDA_DIR = Path("./data/eda")
@@ -132,6 +133,25 @@ def save_raw_snapshot(
     return snapshot_id
 
 
+def save_clean_snapshot(df: pd.DataFrame, raw_snapshot_id: str, cleaning_report: dict = None):
+    """Save cleaned parquet and cleaning report linked to its raw snapshot."""
+    clean_path = CLEAN_DATA_DIR / f"{raw_snapshot_id}.parquet"
+    report_path = METADATA_DIR / f"{raw_snapshot_id}_clean.json"
+
+    df.to_parquet(clean_path, index=False)
+
+    report = {
+        "raw_snapshot_id": raw_snapshot_id,
+        "created_at": datetime.now().isoformat(),
+        **(cleaning_report or {})
+    }
+
+    with open(report_path, "w") as f:
+        json.dump(report, f, indent=4)
+
+    logger.info("Clean snapshot saved | Raw snapshot ID: %s", raw_snapshot_id)
+
+
 def get_latest_snapshot_id():
     files = list(Path(METADATA_DIR).glob("*.json"))
 
@@ -163,11 +183,12 @@ def load_data(data_type: str, snapshot_id: str) -> pd.DataFrame:
 
     DIR_MAP = {
         "raw": RAW_DATA_DIR,
+        "clean": CLEAN_DATA_DIR,
         "processed": PROCESSED_DATA_DIR,
     }
 
     if data_type not in DIR_MAP:
-        raise ValueError("data_type must be either 'raw' or 'processed'.")
+        raise ValueError("data_type must be 'raw', 'clean', or 'processed'.")
 
     directory = DIR_MAP[data_type]
     
