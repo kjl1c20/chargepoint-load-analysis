@@ -8,6 +8,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 from pyiceberg.catalog import load_catalog
 import streamlit as st
+from ydata_profiling import ProfileReport
 
 logging.basicConfig(
     level=logging.INFO,
@@ -22,8 +23,10 @@ load_dotenv(PROJECT_ROOT / ".env")
 
 SENSE_CATALOG_URL = "https://catalog.sdr-sense.org.uk/api/catalog"
 RAW_DATA_DIR = Path("./data/raw")
+CLEAN_DATA_DIR = Path("./data/clean")
 METADATA_DIR = Path("./data/metadata")
 PROCESSED_DATA_DIR = Path("./data/processed")
+EDA_DIR = Path("./data/eda")
 
 
 def connect_to_warehouse(warehouse_slug):
@@ -52,7 +55,8 @@ def save_raw_snapshot(
     df: pd.DataFrame,
     dataset_name: str,
     filters: dict = None,
-    limit = None
+    limit = None,
+    isminimal_eda = False
 ):
     """
     Save parquet snapshot + metadata manifest
@@ -75,6 +79,11 @@ def save_raw_snapshot(
         / f"{snapshot_id}.json"
     )
 
+    eda_path = (
+        EDA_DIR
+        /f"{snapshot_id}.html"
+    )
+
     # SAVE PARQUET
     df.to_parquet(parquet_path, index=False)
 
@@ -84,10 +93,17 @@ def save_raw_snapshot(
         "dataset_name": dataset_name,
         "created_at": datetime.now().isoformat(),
 
+        "date_range": {
+            "start": df["start_time"].min().isoformat(),
+            "end": df["start_time"].max().isoformat()
+        },
+
         "data": {
             "rows": int(df.shape[0]),
             "columns": int(df.shape[1]),
-            "column_names": list(df.columns)
+            "column_names": list(df.columns),
+            "duplicates": int(df.duplicated().sum()),
+            "duplicates_percent": float(df.duplicated().sum()/int(df.shape[0]))
         },
 
         "filters": filters or {},
@@ -106,16 +122,38 @@ def save_raw_snapshot(
     with open(metadata_path, "w") as f:
         json.dump(metadata, f, indent=4)
 
-    # -------------------------------------------------
-    # LOGGING
-    # -------------------------------------------------
     logger.info("Snapshot successfully saved | Snapshot ID: %s", snapshot_id)
+
+    # -------------------------------------------------
+    # GENERATE EXPLORATORY DATA ANALYSIS REPORT
+    # -------------------------------------------------
+    ProfileReport(df, minimal=isminimal_eda).to_file(eda_path)
+    logger.info("EDA Profile Report successfully saved | Snapshot ID: %s", snapshot_id)
 
     return snapshot_id
 
 
+def save_clean_snapshot(df: pd.DataFrame, raw_snapshot_id: str, cleaning_report: dict = None):
+    """Save cleaned parquet and cleaning report linked to its raw snapshot."""
+    clean_path = CLEAN_DATA_DIR / f"{raw_snapshot_id}.parquet"
+    report_path = METADATA_DIR / f"{raw_snapshot_id}_clean.json"
+
+    df.to_parquet(clean_path, index=False)
+
+    report = {
+        "raw_snapshot_id": raw_snapshot_id,
+        "created_at": datetime.now().isoformat(),
+        **(cleaning_report or {})
+    }
+
+    with open(report_path, "w") as f:
+        json.dump(report, f, indent=4)
+
+    logger.info("Clean snapshot saved | Raw snapshot ID: %s", raw_snapshot_id)
+
+
 def get_latest_snapshot_id():
-    files = list(Path(METADATA_DIR).glob("*.json"))
+    files = [f for f in Path(METADATA_DIR).glob("*.json") if not f.name.endswith("_clean.json")]
 
     latest_file = max(files, key=lambda f: f.stat().st_mtime)
 
@@ -145,11 +183,12 @@ def load_data(data_type: str, snapshot_id: str) -> pd.DataFrame:
 
     DIR_MAP = {
         "raw": RAW_DATA_DIR,
+        "clean": CLEAN_DATA_DIR,
         "processed": PROCESSED_DATA_DIR,
     }
 
     if data_type not in DIR_MAP:
-        raise ValueError("data_type must be either 'raw' or 'processed'.")
+        raise ValueError("data_type must be 'raw', 'clean', or 'processed'.")
 
     directory = DIR_MAP[data_type]
     

@@ -23,39 +23,7 @@ logger = logging.getLogger(__name__)
 # ============================================================
 
 snapshot_id = get_latest_snapshot_id() # HARD CODE SNAPSHOT ID IN STRING FOR HISTORICAL DATA
-df = load_data('raw', snapshot_id)
-
-
-# ============================================================
-# data cleaning
-# ============================================================
-
-# type conversion
-df["start_time"] = pd.to_datetime(df["start_time"])
-df["end_time"] = pd.to_datetime(df["end_time"])
-df["duration_minutes"] = pd.to_numeric(df["duration"])/60
-df["Power_kW"] = pd.to_numeric(df["PricePerKWh"])
-df["consumption_kwh"] = pd.to_numeric(df["consumption_kwh"])
-df["connector_id"] = df["connector_id"].astype(int)
-df["latitude"] = pd.to_numeric(df["latitude"])
-df["longitude"] = pd.to_numeric(df["longitude"])
-
-
-# Remove short charging session and low consumption
-df = df[
-    (df["consumption_kwh"] > 0)
-    &
-    (df["duration_minutes"] > 1)
-]
-
-# Drop missing coordinates/city as we are classifying based on city
-df = df.dropna(
-    subset=[
-        "City",
-        "latitude",
-        "longitude"
-    ]
-)
+df = load_data('clean', snapshot_id)
 
 # ============================================================
 # feature engineering
