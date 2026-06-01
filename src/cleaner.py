@@ -42,7 +42,8 @@ df["longitude"] = pd.to_numeric(df["longitude"], errors="coerce")
 # string normalisation
 # ============================================================
 
-df["Postcode"] = df["Postcode"].str.strip().str.upper()
+# Format postcodes to include space between the two parts (e.g. AB101AB -> AB10 1AB)
+df["Postcode"] = df["Postcode"].str.strip().str.upper().str.replace(r"^(\S+?)(\d[A-Z]{2})$", r"\1 \2", regex=True)
 df["connector_type"] = df["connector_type"].str.strip().str.title()
 df["site"] = df["site"].str.strip().str.title()
 df["cp_id"] = df["cp_id"].str.strip()

@@ -32,29 +32,28 @@ EDA_DIR = Path("./data/eda")
 
 def lookup_postcodes(postcodes: list[str]) -> dict[str, str]:
     """
-    Returns a {postcode: admin_district} mapping via the postcodes.io bulk API.
-    Deduplicates input and batches requests in chunks of 100.
+    Returns a {postcode: admin_district} mapping via the postcodes.io outcode endpoint.
+    Uses outward codes (e.g. AB10) so terminated postcodes resolve correctly.
     """
     unique = list(set(p for p in postcodes if p))
-    results = {}
+    unique_outcodes = list(set(p.split()[0] for p in unique))
 
-    for i in range(0, len(unique), 100):
-        batch = unique[i:i + 100]
+    outcode_to_city = {}
+    for outcode in unique_outcodes:
         try:
-            resp = requests.post(
-                "https://api.postcodes.io/postcodes",
-                json={"postcodes": batch},
+            resp = requests.get(
+                f"https://api.postcodes.io/outcodes/{outcode}",
                 timeout=10
             ).json()
+            districts = (resp.get("result") or {}).get("admin_district") or []
+            if districts:
+                outcode_to_city[outcode] = districts[0]
+            else:
+                logger.warning("Outcode not resolved: %s", outcode)
         except requests.RequestException as e:
-            logger.warning("postcodes.io request failed for batch %d: %s", i // 100, e)
-            continue
+            logger.warning("Outcode lookup failed | %s: %s", outcode, e)
 
-        for item in resp.get("result", []):
-            if item and item.get("result"):
-                results[item["query"]] = item["result"]["admin_district"]
-            elif item:
-                logger.warning("Postcode not resolved: %s", item["query"])
+    results = {p: outcode_to_city[p.split()[0]] for p in unique if p.split()[0] in outcode_to_city}
 
     logger.info("Postcode lookup complete | %d/%d resolved", len(results), len(unique))
     return results
