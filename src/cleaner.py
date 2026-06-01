@@ -42,18 +42,13 @@ df["longitude"] = pd.to_numeric(df["longitude"], errors="coerce")
 # string normalisation
 # ============================================================
 
-cities_before = set(df["City"].dropna().unique())
-df["City"] = df["City"].str.strip().str.title()
-cities_after = set(df["City"].dropna().unique())
-
 df["Postcode"] = df["Postcode"].str.strip().str.upper()
 df["connector_type"] = df["connector_type"].str.strip().str.title()
 df["site"] = df["site"].str.strip().str.title()
 df["cp_id"] = df["cp_id"].str.strip()
 
 cleaning_steps.append({
-    "step": "string_normalisation",
-    "city_variants_collapsed": len(cities_before) - len(cities_after)
+    "step": "string_normalisation"
 })
 
 # ============================================================
@@ -92,14 +87,14 @@ cleaning_steps.append({
 })
 
 # ============================================================
-# drop missing coordinates / city
+# drop missing coordinates / postcode
 # ============================================================
 
 before = len(df)
-df = df.dropna(subset=["City", "latitude", "longitude"])
+df = df.dropna(subset=["Postcode", "latitude", "longitude"])
 
 cleaning_steps.append({
-    "step": "drop_missing_city_coords",
+    "step": "drop_missing_postcode_coords",
     "rows_before": before,
     "rows_after": len(df),
     "dropped": before - len(df)

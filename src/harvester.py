@@ -30,7 +30,6 @@ columns = [
     "site",
     "start_time",
     "end_time",
-    "City",
     "Postcode",
     "PricePerKWh",
     "Power_kW",
