@@ -1,7 +1,7 @@
 import pandas as pd
 import logging
 
-from utils import get_latest_snapshot_id, load_data, save_clean_snapshot
+from utils import get_latest_snapshot_id, load_data, save_clean_snapshot, lookup_postcodes
 
 
 logging.basicConfig(
@@ -99,6 +99,22 @@ cleaning_steps.append({
     "rows_after": len(df),
     "dropped": before - len(df)
 })
+
+# ============================================================
+# derive City from Postcode
+# ============================================================
+
+pc_to_city = lookup_postcodes(df["Postcode"].tolist())
+df["City"] = df["Postcode"].map(pc_to_city)
+
+unresolved = df["City"].isna().sum()
+cleaning_steps.append({
+    "step": "city_derived_from_postcode",
+    "unique_postcodes_looked_up": len(pc_to_city),
+    "unresolved": int(unresolved)
+})
+
+logger.info("City derived from postcode | Unresolved: %s", f"{unresolved:,}")
 
 logger.info("Cleaning complete | Rows remaining: %s", f"{len(df):,}")
 

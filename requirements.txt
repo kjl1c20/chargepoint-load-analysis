@@ -9,3 +9,4 @@ pyiceberg
 pyarrow
 scikit-learn
 xgboost
+requests

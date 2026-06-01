@@ -1,4 +1,5 @@
 import os
+import requests
 import pandas as pd
 from datetime import datetime
 import uuid
@@ -27,6 +28,36 @@ CLEAN_DATA_DIR = Path("./data/clean")
 METADATA_DIR = Path("./data/metadata")
 PROCESSED_DATA_DIR = Path("./data/processed")
 EDA_DIR = Path("./data/eda")
+
+
+def lookup_postcodes(postcodes: list[str]) -> dict[str, str]:
+    """
+    Returns a {postcode: admin_district} mapping via the postcodes.io bulk API.
+    Deduplicates input and batches requests in chunks of 100.
+    """
+    unique = list(set(p for p in postcodes if p))
+    results = {}
+
+    for i in range(0, len(unique), 100):
+        batch = unique[i:i + 100]
+        try:
+            resp = requests.post(
+                "https://api.postcodes.io/postcodes",
+                json={"postcodes": batch},
+                timeout=10
+            ).json()
+        except requests.RequestException as e:
+            logger.warning("postcodes.io request failed for batch %d: %s", i // 100, e)
+            continue
+
+        for item in resp.get("result", []):
+            if item and item.get("result"):
+                results[item["query"]] = item["result"]["admin_district"]
+            elif item:
+                logger.warning("Postcode not resolved: %s", item["query"])
+
+    logger.info("Postcode lookup complete | %d/%d resolved", len(results), len(unique))
+    return results
 
 
 def connect_to_warehouse(warehouse_slug):
