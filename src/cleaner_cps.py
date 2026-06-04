@@ -1,16 +1,4 @@
-"""
-Clean the ChargePlace Scotland session files in data/raw_cps/.
-
-Reads every .xlsx / .csv (manually downloaded), normalises the many header
-variants to one schema (reusing the harvester's COLUMN_MAP via _normalise),
-combines, deduplicates, filters out invalid sessions, and writes a clean
-parquet plus a cleaning report.
-
-Note: CPS session files carry NO geography (postcode/lat-long). Location is
-joined separately later from the CP-Report files.
-
-Run:  poetry run python src/cleaner_cps.py
-"""
+"""Combine, clean and write all raw CPS session files to a single parquet."""
 
 import glob
 import json
@@ -57,9 +45,7 @@ def _fix_blank_duration(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-# ============================================================
-# load + combine
-# ============================================================
+# load and combine raw files
 
 cleaning_steps = []
 
@@ -88,9 +74,7 @@ cleaning_steps.append({
     "rows_in": rows_in
 })
 
-# ============================================================
-# deduplication (same session appears across overlapping files)
-# ============================================================
+# drop duplicates (same session appears across overlapping monthly files)
 
 before = len(df)
 df = df.drop_duplicates(subset=["cp_id", "connector", "start_time", "consumption_kwh"])
@@ -102,18 +86,14 @@ cleaning_steps.append({
 })
 logger.info("Duplicates removed | dropped %s", f"{before - len(df):,}")
 
-# ============================================================
-# string normalisation
-# ============================================================
+# normalise strings
 
 df["site_name"] = df["site_name"].str.strip().str.title()
 df["connector_type"] = df["connector_type"].str.strip().str.title()
 df["cp_id"] = df["cp_id"].str.strip()
 cleaning_steps.append({"step": "string_normalisation"})
 
-# ============================================================
-# invalid-session filter
-# ============================================================
+# filter out invalid sessions
 # Upper duration bound: a session blocking a connector for > 24h is implausible
 # (abandoned plug / meter error). Some duration values are wildly corrupt
 # (end-times decades in the future), which would otherwise wreck utilisation.
@@ -138,9 +118,7 @@ cleaning_steps.append({
 })
 logger.info("Invalid sessions removed | dropped %s", f"{before - len(df):,}")
 
-# ============================================================
-# finalise + save
-# ============================================================
+# save
 
 df["month"] = df["start_time"].dt.to_period("M").astype(str)
 df = df.sort_values("start_time").reset_index(drop=True)

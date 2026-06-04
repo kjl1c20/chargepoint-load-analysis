@@ -1,18 +1,4 @@
-"""
-Demand-Pressure Index (CPS) — the primary deliverable.
-
-Combines the engine's measured signals into one transparent, ranked score per
-local authority: "where is charging infrastructure under pressure". Revenue is
-carried alongside as a commercial lens, not folded into the pressure score.
-
-Flow:  clean sessions + charge point table -> per-cp metrics -> per-LA metrics
-       -> percentile-ranked pressure score.
-
-Design choices are recorded in docs/model-decisions.md (Decision 2).
-
-Run:  poetry run python src/pressure_index.py
-      (needs data/reference/charge_points.parquet — build via build_cp_table.py)
-"""
+"""Build the Demand-Pressure Index: weighted percentile rank of saturation and utilisation per LA."""
 
 import logging
 from pathlib import Path
@@ -54,10 +40,6 @@ def build_pressure_index(la_metrics, weights=PRESSURE_WEIGHTS):
     df["pressure_rank"] = df["pressure_score"].rank(ascending=False, method="min").astype(int)
     return df.sort_values("pressure_score", ascending=False).reset_index(drop=True)
 
-
-# ============================================================
-# run
-# ============================================================
 
 if __name__ == "__main__":
     sessions = pd.read_parquet(CLEAN_PATH)

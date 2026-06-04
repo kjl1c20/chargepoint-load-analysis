@@ -1,18 +1,4 @@
-"""
-Usage-profile clustering — group charge points into demand archetypes.
-
-Each charge point gets a behavioural fingerprint (WHEN it's used, HOW LONG
-sessions last, charger type) — all *shape* features that are independent of how
-many sessions it had or how long it was in the dataset, so the result is robust
-to the CPS network churn (unlike a demand forecast).
-
-K-means then groups chargers into archetypes (e.g. commuter rapid / daytime
-destination / overnight). See docs/model-decisions.md (Decision 3).
-
-Output:
-  data/processed/cp_clusters.parquet  — per charge point: profile + cluster + label
-Run:  poetry run python src/cluster_profiles.py
-"""
+"""Cluster charge points into behavioural archetypes from their session shape features."""
 
 import logging
 from pathlib import Path
@@ -106,10 +92,6 @@ def label_cluster(row: pd.Series) -> str:
 
     return f"{speed} {stay} ({when})"
 
-
-# ============================================================
-# run
-# ============================================================
 
 if __name__ == "__main__":
     sessions = pd.read_parquet(

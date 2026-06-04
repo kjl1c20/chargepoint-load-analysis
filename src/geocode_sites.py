@@ -1,15 +1,4 @@
-"""
-Geocode ChargePlace Scotland site names -> coordinates + address.
-
-The CPS session files carry a `site_name` but no geography. This resolves each
-unique site name to latitude/longitude, local authority and postcode via the
-free Nominatim (OpenStreetMap) API, using a fallback chain (full name -> first
-chunk -> trailing town) because verbose venue names often don't match directly.
-
-Results are cached to disk so the (slow, rate-limited) lookups run only once.
-
-Run:  poetry run python src/geocode_sites.py
-"""
+"""Geocode CPS site names to lat/lon + local authority via Nominatim, with disk cache."""
 
 import json
 import time

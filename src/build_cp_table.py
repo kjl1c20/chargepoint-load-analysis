@@ -1,15 +1,4 @@
-"""
-Build the charge point dimension table.
-
-One row per cp_id, combining:
-  - session-derived attributes (site, connectors, activity window, totals)
-  - geocoded location (lat/long, local authority, postcode) from site_name
-
-Output: data/reference/charge_points.parquet  — joins onto the sessions fact
-table by cp_id to give every session a location.
-
-Run:  poetry run python src/build_cp_table.py   (geocodes via cache; see geocode_sites.py)
-"""
+"""Build the charge point table: one row per cp_id with connectors and geocoded location."""
 
 import logging
 from pathlib import Path
@@ -35,9 +24,7 @@ def _mode(s: pd.Series):
     return m.iloc[0] if not m.empty else None
 
 
-# ============================================================
 # session-derived attributes per charge point
-# ============================================================
 
 clean = pd.read_parquet(
     CLEAN_PATH,
@@ -56,9 +43,7 @@ cp = (
 logger.info("Charge points: %s | unique sites: %s",
             f"{len(cp):,}", f"{cp['site_name'].nunique():,}")
 
-# ============================================================
-# geocode site names -> location, join on
-# ============================================================
+# geocode site names → location and join
 
 cache = geocode_all(cp["site_name"].dropna().unique().tolist())
 
@@ -71,9 +56,7 @@ cp = cp.merge(
     on="site_name", how="left"
 )
 
-# ============================================================
-# save + report coverage
-# ============================================================
+# save
 
 OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
 cp.to_parquet(OUT_PATH, index=False)

@@ -1,23 +1,4 @@
-"""
-Harvest ChargePlace Scotland public charging-session data.
-
-CPS publishes monthly "Sessions" spreadsheets on its Monthly Charge Point
-Performance page. This scrapes the page for those .xlsx links, downloads them,
-normalises the (inconsistently named) columns to one schema, and writes a
-combined parquet.
-
-Notes / limitations:
-  - The session files contain NO geography (no postcode/lat-long). A separate
-    cp_id -> location join is needed for postcode-district analysis.
-  - The data month is derived from the `start_time` column itself, not the
-    (wildly inconsistent) filenames.
-  - CPS is mid-transition through 2025-2026; the network is fragmenting, so
-    later months cover a shrinking set of chargers. Control for this with a
-    like-for-like cp_id cohort in any trend analysis.
-
-Run:  poetry run python src/harvest_cps.py
-Needs: openpyxl  (poetry add openpyxl)
-"""
+"""Download and normalise monthly CPS session files from chargeplacescotland.org."""
 
 import re
 import logging
@@ -81,10 +62,7 @@ COLUMN_MAP = {
 
 
 def _links_from_media_api() -> list[str]:
-    """
-    Discover session-file URLs via the WordPress REST media API — structured
-    JSON with pagination, more robust than scraping the HTML page.
-    """
+    """Discover session-file URLs via the WordPress REST media API."""
     links = []
     page = 1
     while True:
@@ -120,12 +98,7 @@ def _links_from_html() -> list[str]:
 
 
 def fetch_session_file_links() -> list[str]:
-    """
-    All CPS 'Sessions' .xlsx URLs. Unions the WP media API (primary, more
-    complete — also lists older files no longer on the page) with the HTML
-    scrape (catches the occasional file the API search misses). Either source
-    failing is tolerated, so discovery degrades gracefully.
-    """
+    """All CPS session .xlsx URLs, unioning the media API and HTML scrape so either can fail."""
     links = set()
     for name, source in (("media API", _links_from_media_api), ("HTML scrape", _links_from_html)):
         try:
@@ -228,10 +201,6 @@ def harvest_cps_sessions(limit: int | None = None) -> pd.DataFrame:
     df["month"] = df["start_time"].dt.to_period("M")
     return df
 
-
-# ============================================================
-# run
-# ============================================================
 
 if __name__ == "__main__":
     sessions = harvest_cps_sessions()

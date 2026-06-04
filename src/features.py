@@ -1,21 +1,4 @@
-"""
-Demand-pressure engine (CPS schema).
-
-Turns cleaned ChargePlace Scotland sessions into demand-pressure metrics in two
-stages, so the heavy session math stays independent of geography:
-
-  1. build_cp_metrics(sessions)         -> one row per charge point (cp_id)
-  2. aggregate_to_la(cp_metrics, cps)   -> roll up to local authority via the
-                                           charge point table (cp_id -> LA)
-
-Metrics:
-  - utilisation : occupied connector-hours / available connector-hours
-  - saturation  : share of time a charge point is completely full (all
-                  connectors busy at once) -> queuing / unmet demand
-  - revenue     : sum of `amount` (£ paid) -> commercial value
-
-These feed the Demand-Pressure Index (pressure_index.py).
-"""
+"""Per-charge-point demand metrics (utilisation, saturation, revenue) rolled up to local authority."""
 
 import numpy as np
 import pandas as pd
