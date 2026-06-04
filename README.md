@@ -1,134 +1,134 @@
-# ⚡ EV Charging Infrastructure Needs Analysis (Scotland)
+# Scotland EV Charging Infrastructure Analysis
 
 ## Overview
 
-This project uses real-world EV charging session data from Scotland’s Chargepoint network to identify **where additional EV charging infrastructure is needed**.
+This project analyses real-world EV charging session data from the ChargePlace Scotland (CPS) public network to identify **where additional EV charging infrastructure is needed** and **what kind of charging each area requires**.
 
-The goal is to build a machine learning model that classifies regions as:
+Two complementary outputs answer the planning question:
 
-> **Needs more chargers (1) vs Sufficient infrastructure (0)**
-
-This helps support data-driven decisions for EV infrastructure planning.
-
----
-
-## Objective
-
-- Identify regions with high EV charging demand pressure
-- Predict areas that likely require additional charging infrastructure
-- Analyse spatial and temporal charging patterns across Scotland
-- Produce actionable insights for infrastructure planning
+1. A **Demand-Pressure Index** — ranks local authorities by infrastructure strain (saturation + utilisation), fully transparent and explainable.
+2. **Usage-Profile Clustering** — groups charge points into behavioural archetypes (rapid top-up, workplace AC, overnight residential, etc.) to guide *what type* of capacity to add where.
 
 ---
 
-## Problem Definition
+## Objectives
 
-Each region (or spatial cluster) is analysed over time to determine infrastructure strain.
-
-### Target Variable
-- **1 → Needs more chargers**
-- **0 → Sufficient capacity**
-
-### Key Metric
-
-Utilisation rate is used as the main indicator of demand pressure.
-High utilisation indicates charger congestion and potential infrastructure shortage.
+- Identify local authorities under the highest EV charging demand pressure
+- Characterise the dominant charging behaviour in each area
+- Combine pressure + archetype into actionable planning recommendations
+- Provide honest, evidence-backed caveats (network fragmentation, geocoding coverage)
 
 ---
 
-## Dataset
+## Data Source
 
-**Source:** Scotland Chargepoint Sessions Dataset
+**ChargePlace Scotland public session data** — monthly spreadsheets published at [chargeplacescotland.org](https://chargeplacescotland.org/monthly-charge-point-performance/)
 
-### Key Features
-- Session start and end time
-- Energy consumed (kWh)
-- Charging duration
-- Chargepoint ID
-- Location / region (mapped or derived)
-- Charger type (AC / DC where available)
+- **Period:** January 2024 – April 2026 (28 months)
+- **Sessions:** ~3.16 million (after cleaning)
+- **Charge points:** 5,325 unique charge point IDs
 
-### Optional External Data
-- Population density
-- EV ownership statistics
-- Charger inventory per region
+> **Network fragmentation note:** CPS is handing chargers to other operators through 2025–26, so the dataset shrinks over time. Falling total session counts reflect dataset coverage loss, not declining demand — demand per charger is flat (~36–40 sessions/month). For this reason, no demand-volume forecast is published.
 
 ---
 
 ## Methodology
 
-### 0.Initial Set Up
-- Create an account at Smart Energy Data Service from [here](https://sso.sdr-sense.org.uk/realms/sense/login-actions/registration?client_id=webapp&tab_id=vys0Y64tOKg&client_data=eyJydSI6Imh0dHBzOi8vZGF0YS5zZHItc2Vuc2Uub3JnLnVrL2xvZ2luL29hdXRoMi9jb2RlL2tleWNsb2FrIiwicnQiOiJjb2RlIiwic3QiOiJ6WjRLc1JuT3NQT3JBMFFDdUJ5cEgydTVqR1BLa21USnltQk56THpEcEpvPSJ9) to get your credential to harvest the data
-- Create `.env` file to store the credentials  
+### Pipeline
+
 ```
-SENSE_CLIENT_ID=REPLACE_WITH_YOUR_ID
-SENSE_CLIENT_SECRET=REPLACE_WITH_YOUR_SECRET
+data/raw_cps/          ← manually downloaded CPS monthly xlsx/csv files
+    ↓ src/cleaner_cps.py
+data/clean/cps_sessions_clean.parquet
+    ↓ src/geocode_sites.py + src/build_cp_table.py
+data/reference/charge_points.parquet   ← cp_id → local authority (via Nominatim geocoding)
+    ↓ src/pressure_index.py
+data/processed/pressure_index.parquet  ← LA-level demand pressure ranking
+    ↓ src/cluster_profiles.py
+data/processed/cp_clusters.parquet     ← per charge point behavioural archetype
+    ↓ src/dashboard.py
+Streamlit dashboard (5 tabs)
 ```
 
-### 1. Data Processing
-- Clean raw session data
-- Handle missing/invalid records
-- Extract time features (hour, day, month)
-- Map chargepoints to regions
+### Demand-Pressure Index
 
-### 2. Feature Engineering
-- Sessions per region
-- Sessions per charger
-- Peak hourly demand
-- Utilisation rate
-- Temporal patterns (weekday/weekend, peak hours)
+Percentile-ranked composite of two signals per local authority:
+- **Saturation rate** (weight 0.6) — share of time when all connectors at a charge point are simultaneously busy (queuing pressure)
+- **Utilisation** (weight 0.4) — share of available connector-time that is occupied
 
-### 3. Label Creation
-Regions are labelled as “needs chargers” based on:
-- High utilisation
-- Peak demand exceeding capacity thresholds
+Revenue is reported separately as a commercial lens, never folded into the pressure score.
 
----
+### Usage-Profile Clustering (ML deliverable)
 
-### Machine Learning Models
-- Logistic Regression (baseline)
-- Random Forest
-- XGBoost (primary model)
+Each charge point (≥ 30 sessions) is represented by 8 shape features:
+- Time-of-day shares (morning / midday / evening / overnight)
+- Weekend ratio, rapid-connector share
+- Median session duration, median energy consumed
 
----
+StandardScaler + KMeans (k=6, chosen by silhouette score = 0.32) produces 6 archetypes:
 
-### Evaluation Metrics
-- Accuracy
-- Precision / Recall
-- F1-score
-- ROC-AUC
+| Archetype | Signature |
+|---|---|
+| Rapid top-up (daytime) | 43 min, 96% rapid — en-route / quick top-up |
+| AC medium-stay (daytime) | ~3 h — shopping / destination |
+| AC long-stay (morning) | ~4.5 h, morning peak — workplace |
+| AC long-stay (evening) | ~7 h — evening / residential |
+| AC all-day (daytime) | ~15 h — park-and-ride |
+| AC long-stay (overnight) | overnight-heavy — residential |
 
 ---
 
-## Outputs
+## Why the v1 (SENSE-based) approach was retired
 
-- Ranked list of high-priority regions for new chargers
-- Heatmap of infrastructure pressure across Scotland
-- Temporal demand patterns (peak hours, weekday vs weekend usage)
+The original version used data from the Smart Energy Data Service (SDR-SENSE). It was retired in June 2026 for two reasons:
+
+- **Incomplete data.** SENSE only exposed two non-consecutive months of CPS sessions (Sep 2024 and Oct 2025) — far too little for any reliable ML study.
+- **ML proved unnecessary.** The v1 classifier had target leakage (the label was derived from the same signal used as a feature). Once fixed, a transparent ranking performed equally well — no black-box model needed.
+
+The project moved to the full ChargePlace Scotland public archive and replaced the classifier with the Demand-Pressure Index and usage-profile clustering.
+
+---
+
+## Key Decisions
+
+See `docs/model-decisions.md` for the full reasoning behind:
+- Why a transparent index was chosen over a predictive classifier
+- Why demand forecasting was dropped (network fragmentation evidence)
+- How usage-profile clustering avoids the fragmentation problem
+- Why out-of-fold predictions are used for any probability outputs
 
 ---
 
 ## Tech Stack
 
-- Python
-- pandas / NumPy
-- scikit-learn
-- XGBoost / LightGBM
-- matplotlib / seaborn
-- GeoPandas / Folium (mapping)
-- Streamlit (optional dashboard)
+- Python (pandas, NumPy)
+- scikit-learn (KMeans, StandardScaler, silhouette score)
+- Plotly / Folium (visualisation + mapping)
+- Streamlit (dashboard)
+- Nominatim / geopy (geocoding)
+- Poetry (dependency management)
 
 ---
 
-## How to run locally via conda environment
-1. create new environment and activate it
-2. Run: `pip install -r requirements.txt` to install dependencies
-3. To reharvest the data, run `python src/harvester.py`
-4. To rerun the machine learning model, run `python src/train_model.py`
-5. To visualise the results, run `streamlit run src/dashboard.py`
+## How to Run
 
-## How to run locally via Poetry
-1. Run: `poetry install` to install dependencies
-2. To reharvest the data run `poetry run python src/harvester.py`
-3. To rerun the machine learning model, run `poetry run python src/train_model.py`
-5. To visualise the results, run `poetry run streamlit run src/dashboard.py`
+```bash
+# Install dependencies
+poetry install
+
+# Clean the raw session files (data/raw_cps/ must contain the downloaded xlsx/csv)
+poetry run python src/cleaner_cps.py
+
+# Build the charge point reference table (geocodes site names → local authority)
+poetry run python src/geocode_sites.py   # slow first run (~1.1s per site); cached after
+poetry run python src/build_cp_table.py
+
+# Compute the demand-pressure index
+poetry run python src/pressure_index.py
+
+# Compute usage-profile clusters
+poetry run python src/cluster_profiles.py
+
+# Launch the dashboard
+poetry run streamlit run src/dashboard.py
+```
