@@ -265,8 +265,3 @@ with tab5:
     - **Archetypes** from k-means (k=6, silhouette 0.32) — soft boundaries, so treat
       archetypes as tendencies, not hard categories.
     """)
-    st.subheader("Methodology")
-    st.markdown("""
-    `raw → clean → reference (charge point table via geocoding) → processed (index,
-    clusters)`. See `docs/model-decisions.md` for the full reasoning.
-    """)
