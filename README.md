@@ -123,3 +123,11 @@ poetry run python src/cluster_profiles.py
 # Launch the dashboard
 poetry run streamlit run src/dashboard.py
 ```
+
+---
+
+## Known Issues
+
+**Geocoding coverage (~73%) — to be investigated.**
+
+Around 27% of charge points fail to resolve to a local authority via Nominatim. I suspect the misses skew toward rural and remote sites, which could mean Highland and similar LAs are under-represented in both the pressure index and the archetype breakdown. Putting in a fix later.
