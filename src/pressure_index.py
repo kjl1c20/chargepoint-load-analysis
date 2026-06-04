@@ -45,7 +45,7 @@ if __name__ == "__main__":
     sessions = pd.read_parquet(CLEAN_PATH)
     charge_points = pd.read_parquet(CP_TABLE_PATH)
 
-    cp_metrics = build_cp_metrics(sessions)
+    cp_metrics = build_cp_metrics(sessions, charge_points)
     la_metrics = aggregate_to_la(cp_metrics, charge_points)
     index = build_pressure_index(la_metrics)
 

@@ -25,7 +25,7 @@ def _saturated_hours(starts: np.ndarray, ends: np.ndarray, k: int) -> float:
     return saturated / 3600.0
 
 
-def build_cp_metrics(sessions: pd.DataFrame) -> pd.DataFrame:
+def build_cp_metrics(sessions: pd.DataFrame, charge_points: pd.DataFrame = None) -> pd.DataFrame:
     """Per-charge-point demand metrics from clean CPS sessions (no geography needed)."""
     df = sessions.copy()
     df["start_time"] = pd.to_datetime(df["start_time"])
@@ -37,28 +37,45 @@ def build_cp_metrics(sessions: pd.DataFrame) -> pd.DataFrame:
     logger.info("Window end %s | %s sessions across %s charge points",
                 window_end.date(), f"{len(df):,}", f"{df['cp_id'].nunique():,}")
 
-    # ---- per-connector availability (first-seen -> window_end) ----
+    # OCM-derived connector counts where available; fall back to session-observed
+    if charge_points is not None and "n_connectors" in charge_points.columns:
+        ocm_k = charge_points.set_index("cp_id")["n_connectors"].to_dict()
+    else:
+        ocm_k = {}
+    ocm_count = sum(1 for cp in df["cp_id"].unique() if cp in ocm_k)
+    logger.info("OCM connector counts available for %d / %d charge points",
+                ocm_count, df["cp_id"].nunique())
+
+    # ---- per-connector availability (first-seen -> last-seen, not window_end) ----
+    # Capping at last_seen avoids counting dead time after a connector migrates off CPS.
     conn = (
         df.groupby(["cp_id", "connector_key"])
-          .agg(occupied_hours=("occupied_hours", "sum"), first_seen=("start_time", "min"))
+          .agg(occupied_hours=("occupied_hours", "sum"),
+               first_seen=("start_time", "min"),
+               last_seen=("end_time", "max"))
           .reset_index()
     )
-    conn["available_hours"] = (window_end - conn["first_seen"]).dt.total_seconds() / 3600.0
+    conn["available_hours"] = (conn["last_seen"] - conn["first_seen"]).dt.total_seconds() / 3600.0
     cp_util = (
         conn.groupby("cp_id")
             .agg(occupied_hours=("occupied_hours", "sum"),
                  available_connector_hours=("available_hours", "sum"),
-                 n_connectors=("connector_key", "nunique"))
+                 n_connectors_observed=("connector_key", "nunique"))
             .reset_index()
+    )
+    # use max(OCM, session-observed): sessions prove the lower bound (if 4 connector IDs
+    # were used, at least 4 exist); OCM may know about connectors that were never used.
+    cp_util["n_connectors"] = cp_util.apply(
+        lambda r: max(ocm_k.get(r["cp_id"], 0), r["n_connectors_observed"]), axis=1
     )
 
     # ---- saturation per charge point ----
     sat_rows = []
     for cp, g in df.groupby("cp_id", sort=False):
-        k = g["connector"].nunique()
+        k = max(ocm_k.get(cp, 0), g["connector"].nunique())
         starts = g["start_time"].values.astype("datetime64[s]").astype("int64")
         ends = g["end_time"].values.astype("datetime64[s]").astype("int64")
-        cp_avail = (window_end - g["start_time"].min()).total_seconds() / 3600.0
+        cp_avail = (g["end_time"].max() - g["start_time"].min()).total_seconds() / 3600.0
         sat_rows.append({"cp_id": cp,
                          "saturated_hours": _saturated_hours(starts, ends, k),
                          "cp_available_hours": cp_avail})

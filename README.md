@@ -131,3 +131,7 @@ poetry run streamlit run src/dashboard.py
 **Geocoding coverage (~73%) — to be investigated.**
 
 Around 27% of charge points fail to resolve to a local authority via Nominatim. I suspect the misses skew toward rural and remote sites, which could mean Highland and similar LAs are under-represented in both the pressure index and the archetype breakdown. Putting in a fix later.
+
+**Connector counts use max(OCM, session-observed) — an approximation.**
+
+CPS `cp_id` granularity is inconsistent. Some IDs represent a single physical EVSE unit; others represent an entire charging hub (e.g. Greenmarket Multi Storey Car Park, Dundee has one `cp_id` covering 23 units). For the saturation threshold `k`, I use the higher of the Open Charge Map connector count and the number of distinct connector IDs observed in sessions. Sessions are ground truth for what physically existed; OCM can add connectors that were present but never used. Verified against ZapMap for Greenmarket (session-observed: 18, ZapMap: 23, OCM: 1 — max gives 18, which is the closest available estimate). A proper fix would require resolving `cp_id` to individual EVSEs, which CPS does not expose.
