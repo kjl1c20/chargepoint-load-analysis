@@ -2,21 +2,12 @@
 
 ## Overview
 
-This project analyses real-world EV charging session data from the ChargePlace Scotland (CPS) public network to identify **where additional EV charging infrastructure is needed** and **what kind of charging each area requires**.
+When I discovered the UK's public EV charging network might not be keeping pace with rising EV adoption, I wanted to find out if there was enough public infrastructure to meet demand. ChargePlace Scotland publishes real session level data, which gave me the chance to investigate. I used clustering to surface charging patterns across Scotland and identify which regions are facing the most pressure.
 
-Two complementary outputs answer the planning question:
+Two complementary outputs answer the question:
 
 1. A **Demand-Pressure Index** — ranks local authorities by infrastructure strain (saturation + utilisation), fully transparent and explainable.
 2. **Usage-Profile Clustering** — groups charge points into behavioural archetypes (rapid top-up, workplace AC, overnight residential, etc.) to guide *what type* of capacity to add where.
-
----
-
-## Objectives
-
-- Identify local authorities under the highest EV charging demand pressure
-- Characterise the dominant charging behaviour in each area
-- Combine pressure + archetype into actionable planning recommendations
-- Provide honest, evidence-backed caveats (network fragmentation, geocoding coverage)
 
 ---
 
