@@ -6,20 +6,14 @@ When I discovered the UK's public EV charging network might not be keeping pace 
 
 Two complementary outputs answer the question:
 
-1. A **Demand-Pressure Index** — ranks local authorities by infrastructure strain (saturation + utilisation), fully transparent and explainable.
-2. **Usage-Profile Clustering** — groups charge points into behavioural archetypes (rapid top-up, workplace AC, overnight residential, etc.) to guide *what type* of capacity to add where.
+1. A **Demand-Pressure Index** — ranks local authorities by infrastructure strain (saturation + utilisation).
+2. **Usage-Profile Clustering** — groups charge points into behavioural archetypes.
 
 ---
 
 ## Data Source
 
 **ChargePlace Scotland public session data** — monthly spreadsheets published at [chargeplacescotland.org](https://chargeplacescotland.org/monthly-charge-point-performance/)
-
-- **Period:** January 2024 – April 2026 (28 months)
-- **Sessions:** ~3.16 million (after cleaning)
-- **Charge points:** 5,325 unique charge point IDs
-
-> **Network fragmentation note:** CPS is handing chargers to other operators through 2025–26, so the dataset shrinks over time. Falling total session counts reflect dataset coverage loss, not declining demand — demand per charger is flat (~36–40 sessions/month). For this reason, no demand-volume forecast is published.
 
 ---
 
@@ -38,7 +32,7 @@ data/processed/pressure_index.parquet  ← LA-level demand pressure ranking
     ↓ src/cluster_profiles.py
 data/processed/cp_clusters.parquet     ← per charge point behavioural archetype
     ↓ src/dashboard.py
-Streamlit dashboard (5 tabs)
+Streamlit dashboard
 ```
 
 ### Demand-Pressure Index
