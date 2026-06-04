@@ -16,14 +16,14 @@ CLEAN_PATH = Path("./data/clean/cps_sessions_clean.parquet")
 CP_TABLE_PATH = Path("./data/reference/charge_points.parquet")
 OUT_PATH = Path("./data/processed/cp_clusters.parquet")
 
-MIN_SESSIONS = 30          # need enough sessions for a stable profile
+MIN_SESSIONS = 50
 K_RANGE = range(3, 8)      # candidate cluster counts (chosen by silhouette)
 
-# behavioural fingerprint (all shape/per-session, churn-proof)
 FEATURES = [
-    "pct_morning", "pct_midday", "pct_evening", "pct_overnight",
+    "pct_morning", "pct_midday", "pct_evening",
     "weekend_ratio", "rapid_share", "median_duration_min", "median_energy_kwh"
 ]
+LABEL_COLS = ["pct_overnight"]
 
 
 def build_profiles(sessions: pd.DataFrame) -> pd.DataFrame:
@@ -68,29 +68,13 @@ def choose_k(X: np.ndarray) -> int:
 
 
 def label_cluster(row: pd.Series) -> str:
-    """Heuristic human label from a cluster's centroid profile."""
-    when = max(
-        [("morning", row["pct_morning"]), ("daytime", row["pct_midday"]),
-         ("evening", row["pct_evening"]), ("overnight", row["pct_overnight"])],
-        key=lambda t: t[1]
-    )[0]
-    # flag a distinctly overnight-heavy cluster even if daytime edges it
-    if row["pct_overnight"] >= 0.20:
-        when = "overnight"
-
-    speed = "Rapid" if row["rapid_share"] >= 0.5 else "AC"
-
-    d = row["median_duration_min"]
-    if d < 60:
-        stay = "top-up"
-    elif d < 240:
-        stay = "medium-stay"
-    elif d < 600:
-        stay = "long-stay"
-    else:
-        stay = "all-day"
-
-    return f"{speed} {stay} ({when})"
+    if row["rapid_share"] >= 0.5:
+        return "Rapid top-up"
+    if row["median_duration_min"] >= 600:
+        return "AC depot / long-stay"
+    if row["pct_morning"] >= 0.35 and row["weekend_ratio"] < 0.15:
+        return "AC commuter"
+    return "AC public / retail"
 
 
 if __name__ == "__main__":
@@ -107,15 +91,13 @@ if __name__ == "__main__":
 
     profiles["cluster"] = KMeans(n_clusters=k, random_state=42, n_init=10).fit_predict(X)
 
-    # profile each cluster + attach a readable archetype label
-    centroids = profiles.groupby("cluster")[FEATURES].mean()
+    centroids = profiles.groupby("cluster")[FEATURES + LABEL_COLS].mean()
     centroids["n_charge_points"] = profiles.groupby("cluster").size()
     centroids["archetype"] = centroids.apply(label_cluster, axis=1)
     profiles["archetype"] = profiles["cluster"].map(centroids["archetype"])
 
     logger.info("\nCluster archetypes:\n%s", centroids.round(2).to_string())
 
-    # attach geography for planning (which archetypes dominate each LA)
     cps = pd.read_parquet(CP_TABLE_PATH, columns=["cp_id", "local_authority"])
     profiles = profiles.merge(cps, on="cp_id", how="left")
 

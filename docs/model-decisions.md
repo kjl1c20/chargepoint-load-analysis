@@ -62,19 +62,8 @@ The volume forecast is not a credible deliverable on this data. A real Scotland-
 
 Chosen as the ML deliverable instead of the forecast because it studies the *shape* of demand, not volume — so network churn doesn't affect it.
 
-Each charge point (≥30 sessions) gets a fingerprint: time-of-day shares, weekend ratio, rapid-connector share, median duration, median energy. Features are standardised. K-means with k chosen by silhouette score (k=6, score 0.32).
+Each charge point above a minimum session threshold gets a fingerprint: time-of-day shares (morning, midday, evening — overnight is dropped as it is linearly redundant with the other three), weekend ratio, rapid-connector share, median duration, median energy. Features are standardised. K-means with k chosen by silhouette score.
 
-Six archetypes:
+Current archetypes: Rapid top-up, AC commuter, AC public / retail, AC depot / long-stay.
 
-| Archetype | Chargers | Signature |
-|---|---|---|
-| Rapid top-up (daytime) | 862 | 43 min, 96% rapid — en-route |
-| AC medium-stay (daytime) | 1,347 | ~3 h — shopping/destination |
-| AC long-stay (morning) | 672 | ~4.5 h, morning peak — workplace |
-| AC long-stay (evening) | 803 | ~7 h — evening/residential |
-| AC all-day (daytime) | 593 | ~15 h — park-and-ride |
-| AC long-stay (overnight) | 131 | overnight-heavy — residential |
-
-Planning value: Highland is rapid-top-up dominated (en-route touring), cities are destination/workplace AC. The pressure index tells you *where* to build; clustering tells you *what* to build.
-
-Caveat: silhouette 0.32 means soft boundaries — these are tendencies, not hard types. Fine for planning segmentation, but don't over-read individual assignments.
+Planning value: the pressure index tells you *where* to build; clustering tells you *what* to build. Silhouette scores in this range mean soft boundaries — these are tendencies, not hard types. Fine for planning segmentation, but don't over-read individual assignments.

@@ -51,21 +51,7 @@ Revenue is reported separately as a commercial lens, never folded into the press
 
 ### Usage-Profile Clustering (ML deliverable)
 
-Each charge point (≥ 30 sessions) is represented by 8 shape features:
-- Time-of-day shares (morning / midday / evening / overnight)
-- Weekend ratio, rapid-connector share
-- Median session duration, median energy consumed
-
-StandardScaler + KMeans (k=6, chosen by silhouette score = 0.32) produces 6 archetypes:
-
-| Archetype | Signature |
-|---|---|
-| Rapid top-up (daytime) | 43 min, 96% rapid — en-route / quick top-up |
-| AC medium-stay (daytime) | ~3 h — shopping / destination |
-| AC long-stay (morning) | ~4.5 h, morning peak — workplace |
-| AC long-stay (evening) | ~7 h — evening / residential |
-| AC all-day (daytime) | ~15 h — park-and-ride |
-| AC long-stay (overnight) | overnight-heavy — residential |
+Each charge point is profiled on session shape features (time-of-day distribution, weekend ratio, rapid-connector share, median duration, median energy). StandardScaler + KMeans with k chosen by silhouette score produces archetypes including rapid top-up, AC commuter, AC public / retail, and AC depot / long-stay.
 
 ---
 
