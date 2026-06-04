@@ -16,13 +16,17 @@ The project moved to the full CPS public archive (28 months, ~3.16M sessions). P
 
 ---
 
-## Decision 1 — How `need_probability` is generated
+## Decision 1 — How `need_probability` is generated *(retired — kept as history)*
 
-The headline output is a ranked list of districts by estimated future demand pressure. How the probability is produced matters.
+> This decision applied to the v1 temporal classifier (`train_model.py`), which has since been removed. The current pipeline has no predictive model — the primary deliverable is the Demand-Pressure Index (Decision 2) and clustering (Decision 4). This section is kept as a record of what was tried and why it was dropped.
+
+The headline output was a ranked list of districts by estimated future demand pressure.
 
 **First attempt (in-sample):** `model.fit(X_train, y_train)` then `predict_proba` on the full dataset including training rows. XGBoost memorised ~80% of districts and pushed their probabilities to extreme values — the distribution was bimodal (68% near 0, 16% near 1) with almost nothing in the middle. Not honest.
 
-**What we use now:** out-of-fold predictions via `cross_val_predict`. Every district's score comes from a fold it wasn't trained on. The mid-range roughly doubled and the >0.9 cluster shrank from 16% to 12%. Top of the ranking (e.g. EH10/Edinburgh) unchanged — the ranking was fine, the confidence values weren't.
+**Second attempt:** out-of-fold predictions via `cross_val_predict`. Every district's score came from a fold it wasn't trained on. The mid-range roughly doubled and the >0.9 cluster shrank from 16% to 12%.
+
+**Why it was retired:** even with the leakage fixed, a transparent percentile ranking matched the model's ROC-AUC. There was no justification for the added complexity. The classifier and `train_model.py` were removed; the index became the primary deliverable.
 
 ---
 
