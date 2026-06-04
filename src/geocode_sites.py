@@ -8,8 +8,6 @@ from pathlib import Path
 import requests
 import pandas as pd
 
-from utils import get_latest_snapshot_id  # noqa: F401  (kept for parity; not required)
-
 
 logging.basicConfig(
     level=logging.INFO,
