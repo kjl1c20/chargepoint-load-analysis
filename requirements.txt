@@ -10,3 +10,4 @@ pyarrow
 scikit-learn
 xgboost
 requests
+openpyxl
