@@ -1,16 +1,6 @@
 """
 Scotland EV Charging — Infrastructure Planning Dashboard.
 
-For a planning audience. Five tabs:
-  1. Overview      — network state + honest temporal context (fragmentation)
-  2. Demand Pressure — where is the network strained now (pressure index)
-  3. Demand Archetypes — what KIND of charging happens where (clustering)
-  4. Planning Priorities — where + what to build (pressure x archetype)
-  5. Data & Method  — coverage, caveats, methodology
-
-Reads the processed outputs (pressure_index, cp_clusters) and aggregates the
-clean sessions live with caching. (A dbt precompute layer is planned later.)
-
 Run:  poetry run streamlit run src/dashboard.py
 """
 
@@ -20,9 +10,6 @@ import numpy as np
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
-import folium
-from folium.plugins import HeatMap
-from streamlit_folium import st_folium
 import streamlit as st
 
 
@@ -102,8 +89,8 @@ dominant = (
 st.title("Scotland EV Charging Profile Analysis")
 st.caption("ChargePlace Scotland public network · demand pressure & charging archetypes aggregated by local authority")
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs(
-    ["Overview", "Demand Pressure", "Demand Archetypes", "Planning Priorities", "Data & Method"]
+tab1, tab2, tab3, tab4 = st.tabs(
+    ["Overview", "Demand Pressure", "Demand Archetypes", "Planning Priorities"]
 )
 
 # ============================================================
@@ -112,6 +99,7 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs(
 
 with tab1:
     t = load_totals()
+    st.caption(f"Analysis Period: {t['date_min']} → {t['date_max']}")
     c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("Charge points", f"{t['chargers']:,}")
     c2.metric("Sessions", f"{t['sessions']:,}")
@@ -120,11 +108,6 @@ with tab1:
     c5.metric("Revenue (context)", f"£{t['revenue']:,.0f}")
 
     st.subheader("Demand over time")
-    st.warning(
-        "**Read with care:** the recent drop in total sessions is the CPS network "
-        "*shrinking* (chargers migrating to other operators), **not** demand falling — "
-        "demand *per charger* stays flat. Plotted together below."
-    )
     m = load_monthly()
     fig = go.Figure()
     fig.add_bar(x=m["month"], y=m["sessions"], name="Total sessions", marker_color="#9ecae1")
@@ -155,32 +138,81 @@ with tab1:
 
 with tab2:
     st.subheader("Demand-pressure score by local authority")
-    st.caption("Percentile-ranked blend of saturation (queuing, 0.6) + utilisation (0.4).")
-
-    top = index.sort_values("pressure_score", ascending=False)
-    st.dataframe(
-        top[["pressure_rank", "local_authority", "pressure_score", "utilisation",
-             "saturation_rate", "n_connectors", "n_chargepoints", "revenue_per_connector"]],
-        use_container_width=True, hide_index=True
+    st.caption(
+        "Each local authority is scored by saturation rate (share of time all connectors are "
+        "simultaneously busy, weight 60%) and utilisation (occupancy rate, weight 40%), "
+        "both ranked relative to other authorities."
     )
 
-    fig_bar = px.bar(top.head(20).sort_values("pressure_score"),
-                     x="pressure_score", y="local_authority", orientation="h",
-                     hover_data=["utilisation", "saturation_rate", "n_connectors"])
-    fig_bar.update_layout(height=520, margin=dict(t=10))
-    st.plotly_chart(fig_bar, use_container_width=True)
+    top = index.sort_values("pressure_score", ascending=False).reset_index(drop=True)
+    top["rank_label"] = top["pressure_rank"].astype(str) + ". " + top["local_authority"]
 
-    st.subheader("Pressure map")
-    mp = index.dropna(subset=["latitude", "longitude"])
-    m_map = folium.Map(location=[56.6, -4.2], zoom_start=6, tiles="CartoDB positron")
-    for _, r in mp.iterrows():
-        folium.CircleMarker(
-            [r["latitude"], r["longitude"]], radius=5 + 12 * r["pressure_score"],
-            popup=(f"<b>{r['local_authority']}</b><br>Pressure {r['pressure_score']:.2f}<br>"
-                   f"Utilisation {r['utilisation']:.1%}<br>Saturation {r['saturation_rate']:.1%}"),
-            color="crimson", fill=True, fill_opacity=0.6
-        ).add_to(m_map)
-    st_folium(m_map, width=1100, height=520)
+    n_show = st.slider("Local authorities to show", min_value=5, max_value=len(top), value=len(top), step=1)
+    display_df = top.head(n_show).sort_values("pressure_score")
+    chart_h = max(400, n_show * 24)
+
+    col_bar, col_map = st.columns([1, 1])
+
+    with col_bar:
+        fig_bar = px.bar(
+            display_df,
+            x="pressure_score",
+            y="rank_label",
+            orientation="h",
+            color="pressure_score",
+            color_continuous_scale="OrRd",
+            custom_data=["local_authority", "pressure_rank", "utilisation",
+                         "saturation_rate", "n_chargepoints", "n_connectors", "revenue_per_connector"],
+        )
+        fig_bar.update_traces(
+            hovertemplate=(
+                "<b>%{customdata[0]}</b> (Rank %{customdata[1]})<br>"
+                "Pressure score: %{x:.3f}<br>"
+                "Saturation rate: %{customdata[3]:.1%}<br>"
+                "Utilisation: %{customdata[2]:.1%}<br>"
+                "Charge points: %{customdata[4]:,} (%{customdata[5]:,} connectors)<br>"
+                "Revenue / connector: £%{customdata[6]:,.0f}"
+                "<extra></extra>"
+            )
+        )
+        fig_bar.update_layout(
+            height=chart_h,
+            margin=dict(t=10, l=10),
+            coloraxis_showscale=False,
+            yaxis_title="",
+            xaxis_title="Pressure score",
+        )
+        st.plotly_chart(fig_bar, use_container_width=True)
+
+    with col_map:
+        mp = display_df.dropna(subset=["latitude", "longitude"])
+        fig_map = px.scatter_mapbox(
+            mp,
+            lat="latitude",
+            lon="longitude",
+            color="pressure_score",
+            color_continuous_scale="OrRd",
+            size="pressure_score",
+            size_max=22,
+            hover_name="local_authority",
+            custom_data=["pressure_rank", "utilisation", "saturation_rate", "n_chargepoints"],
+            mapbox_style="open-street-map",
+            zoom=5,
+            center={"lat": 56.6, "lon": -4.2},
+            height=chart_h,
+        )
+        fig_map.update_traces(
+            hovertemplate=(
+                "<b>%{hovertext}</b> (Rank %{customdata[0]})<br>"
+                "Pressure score: %{marker.color:.3f}<br>"
+                "Saturation rate: %{customdata[2]:.1%}<br>"
+                "Utilisation: %{customdata[1]:.1%}<br>"
+                "Charge points: %{customdata[3]:,}"
+                "<extra></extra>"
+            )
+        )
+        fig_map.update_layout(margin=dict(t=10), coloraxis_showscale=False)
+        st.plotly_chart(fig_map, use_container_width=True)
 
 # ============================================================
 # Tab 3 — Demand Archetypes
@@ -233,8 +265,16 @@ with tab4:
     def recommend(row):
         if row["pressure_score"] < 0.5:
             return "Monitor"
-        kind = "rapid" if "Rapid" in str(row["dominant_archetype"]) else "AC (destination/long-stay)"
-        return f"Expand — add {kind} capacity"
+        a = str(row["dominant_archetype"])
+        if "Rapid" in a:
+            kind = "rapid chargers"
+        elif "commuter" in a:
+            kind = "AC workplace chargers"
+        elif "depot" in a:
+            kind = "AC long-stay / depot chargers"
+        else:
+            kind = "AC public / retail chargers"
+        return f"Expand — add {kind}"
 
     pri["recommendation"] = pri.apply(recommend, axis=1)
     st.dataframe(
@@ -243,25 +283,5 @@ with tab4:
         use_container_width=True, hide_index=True
     )
 
-# ============================================================
-# Tab 5 — Data & Method
-# ============================================================
-
-with tab5:
-    t = load_totals()
-    st.subheader("Coverage")
-    st.markdown(f"""
-    - **Source:** ChargePlace Scotland public session data
-    - **Period:** {t['date_min']} → {t['date_max']}
-    - **Sessions:** {t['sessions']:,} across {t['chargers']:,} charge points
-    """)
-    st.subheader("Key caveats")
-    st.markdown("""
-    - **Network fragmentation:** CPS is handing chargers to other operators through
-      2025–26, so the dataset *shrinks* over time. Falling totals ≠ falling demand
-      (demand per charger is flat). **No demand forecast** is published for this reason.
-    - **Pressure** = percentile-ranked saturation (0.6) + utilisation (0.4); absolute
-      utilisation is low (~3–9%), so the ranking is *relative*.
-    - **Archetypes** from k-means (k=6, silhouette 0.32) — soft boundaries, so treat
-      archetypes as tendencies, not hard categories.
-    """)
+st.divider()
+st.caption("Data source: ChargePlace Scotland public session data · chargeplacescotland.org")
