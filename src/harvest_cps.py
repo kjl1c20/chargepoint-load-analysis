@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 CPS_PERFORMANCE_URL = "https://chargeplacescotland.org/monthly-charge-point-performance/"
 CPS_MEDIA_API = "https://chargeplacescotland.org/wp-json/wp/v2/media"
-RAW_CPS_DIR = Path("./data/raw_cps")
+RAW_CPS_DIR = Path("./Volumes/chargepoint_analysis/bronze/raw_cps")
 
 # normalise the many header spellings across eras to one schema
 COLUMN_MAP = {
