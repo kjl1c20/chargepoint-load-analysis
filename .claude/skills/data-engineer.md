@@ -142,14 +142,6 @@ Your responsibility is to ensure the data pipeline from raw CPS monthly files to
 {Yes/No}
 ```
 
-### OUTPUT LOCATIONS:
-
-- Databricks notebooks in `/databricks/notebooks/`
-- Job definitions in `/databricks/jobs/`
-- Local pipeline scripts remain in `src/` for local dev reference
-- `/coordination/status/data-engineer.md` — status updates
-- `docs/` — pipeline architecture and data lineage documentation
-
 ### DEPENDENCIES:
 
 - Databricks workspace access (Unity Catalog enabled)
