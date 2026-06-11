@@ -25,8 +25,7 @@ try:
     from pyspark.dbutils import DBUtils
     spark = SparkSession.builder.getOrCreate()
     dbutils = DBUtils(spark)
-except ImportError:
-    # Fallback for local testing - dbutils will be injected by notebook context
+except Exception:
     dbutils = None
 
 
