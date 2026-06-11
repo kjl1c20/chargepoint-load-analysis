@@ -47,7 +47,7 @@ def _latest_snapshot() -> str:
     entries = dbutils.fs.ls(BRONZE_PATH)
     snapshots = sorted(
         e.path for e in entries
-        if e.name.startswith("locations_") and e.name.endswith(".json")
+        if e.name.startswith("Scotland_chargepoint_locations_") and e.name.endswith(".json")
     )
     if not snapshots:
         raise FileNotFoundError(f"No location snapshots found in {BRONZE_PATH}")
