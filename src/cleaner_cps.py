@@ -85,6 +85,7 @@ COLUMN_MAP = {
     "consumed": "consumption_kwh",
     # duration / times
     "duration": "duration",
+    "duration_time": "duration",
     "start": "start_time",
     "start time": "start_time",
     "starttime": "start_time",
@@ -274,7 +275,6 @@ def process_files(file_paths: list) -> tuple:
 def write_to_silver(df: pd.DataFrame, full_refresh: bool):
     """Write cleaned DataFrame to Silver Delta table, partitioned by year_month."""
     sdf = spark.createDataFrame(df, schema=SILVER_SCHEMA)
-    spark.conf.set("spark.sql.sources.partitionOverwriteMode", "dynamic")
 
     write_mode = "overwrite"
     overwrite_schema = full_refresh
