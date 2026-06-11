@@ -21,7 +21,7 @@ try:
     from pyspark.dbutils import DBUtils
     spark = SparkSession.builder.getOrCreate()
     dbutils = DBUtils(spark)
-except ImportError:
+except Exception:
     dbutils = None
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
@@ -36,9 +36,12 @@ VOLUME_PATH = os.getenv(
     "/Volumes/chargepoint_analysis/bronze/locations"
 )
 FEED_TIMEOUT = int(os.getenv("FEED_TIMEOUT_SECONDS", "60"))
-
-# Alert threshold — warn if the feed returns fewer locations than expected
 MIN_EXPECTED_LOCATIONS = int(os.getenv("MIN_EXPECTED_LOCATIONS", "1000"))
+
+_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (compatible; ChargePoint-Analysis/1.0)",
+    "Accept": "application/json",
+}
 
 logger.info("Configuration: FEED_URL=%s, VOLUME_PATH=%s", FEED_URL, VOLUME_PATH)
 
@@ -50,25 +53,24 @@ logger.info("Configuration: FEED_URL=%s, VOLUME_PATH=%s", FEED_URL, VOLUME_PATH)
 )
 def _fetch_feed() -> dict:
     logger.debug("Fetching: %s", FEED_URL)
-    resp = requests.get(FEED_URL, timeout=FEED_TIMEOUT)
+    resp = requests.get(FEED_URL, headers=_HEADERS, timeout=FEED_TIMEOUT)
     resp.raise_for_status()
     return resp.json()
 
 
 def harvest() -> dict:
-    """Fetch the CPS locations feed and write a dated snapshot to Bronze.
-
-    Returns a result dict with status, filename, and counts.
-    """
+    """Fetch the CPS locations feed and write a dated snapshot to Bronze."""
     if dbutils is None:
-        raise RuntimeError("dbutils not available — cannot access Volumes")
+        raise RuntimeError("dbutils not available — run this script in a Databricks job or notebook")
 
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     target_name = f"locations_{today}.json"
     target_path = f"{VOLUME_PATH}/{target_name}"
     temp_path = f"{VOLUME_PATH}/.tmp_{target_name}"
 
+    logger.info("=" * 70)
     logger.info("CPS LOCATIONS HARVESTER")
+    logger.info("=" * 70)
 
     # Idempotency: skip if today's snapshot already exists
     try:
@@ -93,7 +95,6 @@ def harvest() -> dict:
             len(locations), MIN_EXPECTED_LOCATIONS
         )
 
-    # Wrap raw data with harvest metadata before writing
     snapshot = {
         "harvested_at": datetime.now(timezone.utc).isoformat(),
         "feed_url": FEED_URL,
@@ -106,7 +107,6 @@ def harvest() -> dict:
     payload = json.dumps(snapshot, ensure_ascii=False).encode("utf-8")
 
     # Write to temp path inside volume, then atomic move — serverless-compatible
-    # (same pattern as harvest_cps.py: avoids /Workspace/tmp/ limitations)
     try:
         with open(temp_path, "wb") as f:
             f.write(payload)
@@ -118,17 +118,14 @@ def harvest() -> dict:
             pass
         raise RuntimeError(f"Failed to write snapshot to {target_path}: {e}") from e
 
-    size_mb = len(payload) / 1e6
-    logger.info("Written: %s (%.2f MB)", target_name, size_mb)
+    logger.info("Written: %s (%.2f MB)", target_name, len(payload) / 1e6)
 
-    # List volume to confirm
     try:
         snapshots = sorted(
             e.name for e in dbutils.fs.ls(VOLUME_PATH)
             if e.name.startswith("locations_") and e.name.endswith(".json")
         )
-    except Exception as exc:
-        logger.warning("Could not list volume after write: %s", exc)
+    except Exception:
         snapshots = []
 
     logger.info("=" * 70)
