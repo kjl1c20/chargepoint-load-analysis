@@ -45,7 +45,7 @@ def harvest() -> dict:
         token=os.getenv("DATABRICKS_TOKEN"),
     )
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    target_path = f"{VOLUME_PATH}/locations_{today}.json"
+    target_path = f"{VOLUME_PATH}/Scotland_chargepoint_locations_{today}.json"
 
     try:
         w.files.get_metadata(target_path)
