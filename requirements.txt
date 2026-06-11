@@ -14,3 +14,4 @@ openpyxl
 beautifulsoup4
 python-dateutil
 tenacity
+databricks-sdk
