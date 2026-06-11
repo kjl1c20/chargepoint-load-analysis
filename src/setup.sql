@@ -28,7 +28,7 @@ CREATE VOLUME IF NOT EXISTS chargepoint_analysis.bronze.locations;
 CREATE SCHEMA IF NOT EXISTS chargepoint_analysis.silver;
 
 CREATE TABLE IF NOT EXISTS chargepoint_analysis.silver.cps_sessions_clean (
-    site_name        STRING    NOT NULL    COMMENT 'Human-readable site name',
+    site_name        STRING                COMMENT 'Human-readable site name',
     cp_id            STRING    NOT NULL    COMMENT 'Charge point identifier',
     connector_type   STRING                COMMENT 'AC / DC / Rapid etc.',
     connector        STRING    NOT NULL    COMMENT 'Connector number within the charge point',
