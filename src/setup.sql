@@ -58,6 +58,7 @@ CREATE TABLE IF NOT EXISTS chargepoint_analysis.silver.charge_points (
     connector_type      STRING                COMMENT 'AC or DC',
     max_charge_rate_kw  DOUBLE                COMMENT 'Maximum charge rate in kW',
     network_status      STRING                COMMENT 'AVAILABLE / CHARGING / INOPERATIVE / UNKNOWN',
+    source_snapshot     STRING    NOT NULL    COMMENT 'Bronze locations filename this row was built from',
     ingested_at         TIMESTAMP NOT NULL    COMMENT 'Pipeline ingest timestamp (UTC)',
     CONSTRAINT charge_points_pk PRIMARY KEY (cp_id)
 )

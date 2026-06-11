@@ -12,7 +12,7 @@ try:
         StringType, DoubleType, TimestampType,
     )
     from pyspark.dbutils import DBUtils
-    spark = SparkSession.builder.getOrCreate()
+    spark = SparkSession.getActiveSession() or SparkSession.builder.getOrCreate()
     dbutils = DBUtils(spark)
     SILVER_SCHEMA = StructType([
         StructField("cp_id",               StringType(),    False),
@@ -25,6 +25,7 @@ try:
         StructField("connector_type",      StringType(),    True),
         StructField("max_charge_rate_kw",  DoubleType(),    True),
         StructField("network_status",      StringType(),    True),
+        StructField("source_snapshot",     StringType(),    False),
         StructField("ingested_at",         TimestampType(), False),
     ])
 except Exception:
@@ -39,6 +40,7 @@ BRONZE_PATH = os.getenv("LOCATIONS_VOLUME_PATH", "/Volumes/chargepoint_analysis/
 SILVER_TABLE = os.getenv("SILVER_CP_TABLE", "chargepoint_analysis.silver.charge_points")
 
 POWER_TYPE_MAP = {"AC_1_PHASE": "AC", "AC_2_PHASE": "AC", "AC_3_PHASE": "AC", "DC": "DC"}
+MIN_EXPECTED_EVSES = int(os.getenv("MIN_EXPECTED_EVSES", "1000"))
 
 
 def _latest_snapshot() -> str:
@@ -62,6 +64,10 @@ def _flatten(locations: list) -> pd.DataFrame:
             skipped += 1
             continue
         for evse in loc.get("evses", []):
+            cp_id = evse.get("id")
+            if cp_id is None:
+                skipped += 1
+                continue
             connectors = evse.get("connectors", [])
             if connectors:
                 # Pick connector with highest charge rate to represent the EVSE
@@ -72,7 +78,7 @@ def _flatten(locations: list) -> pd.DataFrame:
                 connector_type, max_kw = None, None
 
             rows.append({
-                "cp_id":              str(evse["id"]),
+                "cp_id":              str(cp_id),
                 "site_name":          loc.get("name"),
                 "address":            loc.get("address"),
                 "city":               loc.get("city"),
@@ -101,7 +107,20 @@ def main():
     logger.info("Locations: %d | EVSEs: %d", snap["location_count"], snap["evse_count"])
 
     df = _flatten(snap["data"])
+    if len(df) < MIN_EXPECTED_EVSES:
+        raise ValueError(
+            f"Only {len(df)} EVSEs after flatten (expected >= {MIN_EXPECTED_EVSES}). "
+            "Aborting write — snapshot may be corrupt or incomplete."
+        )
+    df["source_snapshot"] = path.rsplit("/", 1)[-1]
     df["ingested_at"] = pd.Timestamp.utcnow()
+
+    required = [f.name for f in SILVER_SCHEMA.fields if not f.nullable and f.name in df.columns]
+    before = len(df)
+    df = df.dropna(subset=required)
+    dropped = before - len(df)
+    if dropped:
+        logger.warning("Dropped %d rows with nulls in non-nullable fields", dropped)
 
     sdf = spark.createDataFrame(df, schema=SILVER_SCHEMA)
     sdf.write.format("delta").mode("overwrite").option("overwriteSchema", "true").saveAsTable(SILVER_TABLE)

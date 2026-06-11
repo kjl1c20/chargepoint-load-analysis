@@ -18,7 +18,7 @@ try:
         StringType, DoubleType, TimestampType
     )
     from pyspark.dbutils import DBUtils
-    spark = SparkSession.builder.getOrCreate()
+    spark = SparkSession.getActiveSession() or SparkSession.builder.getOrCreate()
     dbutils = DBUtils(spark)
     SILVER_SCHEMA = StructType([
         StructField("site_name",        StringType(),    True),
@@ -46,7 +46,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Configuration
 BRONZE_VOLUME_PATH = os.getenv("BRONZE_VOLUME_PATH", "/Volumes/chargepoint_analysis/bronze/raw_cps")
 SILVER_TABLE = os.getenv("SILVER_TABLE", "chargepoint_analysis.silver.cps_sessions_clean")
 FULL_REFRESH = os.getenv("FULL_REFRESH", "false").lower() == "true"
@@ -208,6 +207,15 @@ def _normalise(df: pd.DataFrame, source_file: str) -> pd.DataFrame:
 
 def _clean(df: pd.DataFrame) -> pd.DataFrame:
     """Deduplicate, filter invalid sessions, and normalise strings."""
+    nat_start = int(df["start_time"].isna().sum())
+    nan_kwh = int(df["consumption_kwh"].isna().sum())
+    nan_dur = int(df["duration_minutes"].isna().sum())
+    if nat_start or nan_kwh or nan_dur:
+        logger.warning(
+            "Coercion failures — start_time NaT: %d | consumption_kwh NaN: %d | duration_minutes NaN: %d",
+            nat_start, nan_kwh, nan_dur,
+        )
+
     before = len(df)
     df = df.drop_duplicates(subset=["cp_id", "connector", "start_time", "consumption_kwh"])
     logger.info("Dedup: dropped %d rows", before - len(df))
@@ -243,6 +251,15 @@ def _clean(df: pd.DataFrame) -> pd.DataFrame:
         & (df["end_time"] > df["start_time"])
     ]
     logger.info("Invalid session filter: dropped %d rows", before - len(df))
+
+    if SILVER_SCHEMA:
+        required = [f.name for f in SILVER_SCHEMA.fields if not f.nullable and f.name in df.columns]
+        before = len(df)
+        df = df.dropna(subset=required)
+        dropped = before - len(df)
+        if dropped:
+            logger.warning("Dropped %d rows with nulls in non-nullable fields", dropped)
+
     return df
 
 
@@ -275,19 +292,11 @@ def process_files(file_paths: list) -> tuple:
 def write_to_silver(df: pd.DataFrame, full_refresh: bool):
     """Write cleaned DataFrame to Silver Delta table, partitioned by year_month."""
     sdf = spark.createDataFrame(df, schema=SILVER_SCHEMA)
-
-    write_mode = "overwrite"
-    overwrite_schema = full_refresh
-
-    writer = (
-        sdf.write
-        .format("delta")
-        .mode(write_mode)
-        .partitionBy("year_month")
-    )
-    if overwrite_schema:
-        writer = writer.option("overwriteSchema", "true")
-
+    writer = sdf.write.format("delta").partitionBy("year_month")
+    if full_refresh:
+        writer = writer.mode("overwrite").option("overwriteSchema", "true")
+    else:
+        writer = writer.mode("append")
     writer.saveAsTable(SILVER_TABLE)
     logger.info("Written %d rows to %s", len(df), SILVER_TABLE)
 
@@ -300,9 +309,7 @@ def main():
     except Exception:
         pass
 
-    logger.info("=" * 70)
     logger.info("CPS SILVER CLEANER — mode: %s", "FULL REFRESH" if full_refresh else "INCREMENTAL")
-    logger.info("=" * 70)
 
     bronze_files = list_bronze_files()
     logger.info("Bronze Volume: %d files found", len(bronze_files))
@@ -324,9 +331,7 @@ def main():
 
     df, loaded, skipped = process_files(files_to_process)
 
-    logger.info("=" * 70)
     logger.info("SUMMARY")
-    logger.info("=" * 70)
     logger.info("Files loaded: %d | skipped: %d", len(loaded), len(skipped))
     if skipped:
         logger.warning("Skipped files: %s", json.dumps(skipped, indent=2))

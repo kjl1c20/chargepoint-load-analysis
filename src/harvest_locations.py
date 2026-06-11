@@ -60,7 +60,10 @@ def harvest() -> dict:
     total_evses = sum(len(loc.get("evses", [])) for loc in locations)
 
     if len(locations) < MIN_EXPECTED_LOCATIONS:
-        logger.warning("Only %d locations returned — feed may be incomplete", len(locations))
+        raise ValueError(
+            f"Feed returned only {len(locations)} locations (expected >= {MIN_EXPECTED_LOCATIONS}). "
+            "Aborting to avoid writing an incomplete snapshot to Bronze."
+        )
 
     snapshot = {
         "harvested_at": datetime.now(timezone.utc).isoformat(),
