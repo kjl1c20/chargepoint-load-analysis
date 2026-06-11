@@ -46,3 +46,20 @@ CREATE TABLE IF NOT EXISTS chargepoint_analysis.silver.cps_sessions_clean (
 USING DELTA
 PARTITIONED BY (year_month)
 COMMENT 'Cleaned CPS charging sessions — Silver layer';
+
+CREATE TABLE IF NOT EXISTS chargepoint_analysis.silver.charge_points (
+    cp_id               STRING    NOT NULL    COMMENT 'Charge point identifier — matches cp_id in cps_sessions_clean',
+    site_name           STRING                COMMENT 'Site name from CPS feed',
+    address             STRING                COMMENT 'Street address',
+    city                STRING                COMMENT 'City',
+    postcode            STRING                COMMENT 'Postcode',
+    latitude            DOUBLE                COMMENT 'WGS84 latitude',
+    longitude           DOUBLE                COMMENT 'WGS84 longitude',
+    connector_type      STRING                COMMENT 'AC or DC',
+    max_charge_rate_kw  DOUBLE                COMMENT 'Maximum charge rate in kW',
+    network_status      STRING                COMMENT 'AVAILABLE / CHARGING / INOPERATIVE / UNKNOWN',
+    ingested_at         TIMESTAMP NOT NULL    COMMENT 'Pipeline ingest timestamp (UTC)',
+    CONSTRAINT charge_points_pk PRIMARY KEY (cp_id)
+)
+USING DELTA
+COMMENT 'Active CPS charge points with coordinates — Silver layer. Built by build_charge_points.py from Bronze locations feed.';

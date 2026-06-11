@@ -2,6 +2,9 @@
 
 @.claude/skills/data-engineer.md
 
+## Role
+Use the data engineer role for pipeline and ETL tasks.
+
 ## Project
 Check out the readme file for context.
 
