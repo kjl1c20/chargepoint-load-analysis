@@ -1,7 +1,3 @@
--- One-time environment setup: run this in a Databricks SQL warehouse or notebook
--- before executing any pipeline job for the first time in any environment.
--- Order matters: catalog → schema → volume/table.
-
 -- ============================================================
 -- CATALOG
 -- ============================================================
@@ -90,10 +86,10 @@ CREATE TABLE IF NOT EXISTS chargepoint_analysis.gold.site_pressure (
     revenue_per_connector     DOUBLE              COMMENT 'total_revenue / n_connectors',
     n_connectors              INT                 COMMENT 'Connectors on this charge point (from Silver charge_points)',
     single_connector          BOOLEAN             COMMENT 'n_connectors == 1 (saturation == utilisation by construction)',
-    site_name                 STRING              COMMENT 'Site name',
-    postcode                  STRING              COMMENT 'Postcode',
+    site_name                 STRING              COMMENT '',
+    postcode                  STRING              COMMENT '',
     postcode_area             STRING              COMMENT 'Leading letters of postcode (G, EH, AB ...) for regional filtering',
-    latitude                  DOUBLE              COMMENT 'WGS84 latitude',
+    latitude                  DOUBLE              COMMENT '',
     longitude                 DOUBLE              COMMENT 'WGS84 longitude',
     ingested_at               TIMESTAMP NOT NULL  COMMENT 'Pipeline run timestamp (UTC)',
     CONSTRAINT site_pressure_pk PRIMARY KEY (cp_id)
