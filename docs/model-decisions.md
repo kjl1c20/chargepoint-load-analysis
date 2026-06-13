@@ -34,6 +34,8 @@ The headline output was a ranked list of districts by estimated future demand pr
 
 After the temporal validation showed the simple ranking matched the model in ROC-AUC, we made the index the primary deliverable rather than the classifier.
 
+> **Update (2026-06-13):** the index now runs at **charge-point (site) grain**, not local authority — see Decision 5. The weighted-percentile definition below is unchanged; only the unit being ranked changed (sites instead of LAs).
+
 Two signals per local authority:
 - **Saturation rate** (weight 0.6) — share of charge-point time when every connector is simultaneously busy. The most direct evidence of unmet demand.
 - **Utilisation** (weight 0.4) — share of available connector-time that's occupied.
@@ -58,7 +60,27 @@ The volume forecast is not a credible deliverable on this data. A real Scotland-
 
 ---
 
-## Decision 4 — Usage-profile clustering
+## Decision 4 — Usage-profile clustering / behaviour archetypes *(removed entirely 2026-06-13)*
+
+> **Removed entirely.** The archetype concept is gone from the project — no clustering and
+> no rule-based behaviour labels. This happened in two steps:
+>
+> **Step 1 — KMeans → rules.** KMeans was retired first because the cluster *naming* was
+> done by four threshold rules on the centroids; if four rules can name every cluster, the
+> rules carry the segmentation and the model adds nothing. Compounded by the fact that the
+> only place clustering fed a decision — the LA planning table's *modal* archetype — was a
+> uniform "AC public / retail" in every LA (catch-all rule + a mode over it). A column that
+> never varies answers nothing.
+>
+> **Step 2 — rules removed too.** The rule-based per-site behaviour label
+> (`label_behaviour`) and the feature builder behind it (`build_profiles`) were then
+> dropped entirely. The behaviour/"what to build" lens did not earn its place against the
+> project's actual question — *where to expand strained sites* — which the pressure
+> ranking answers on its own. The dashboard is now pure pressure ranking + per-site
+> performance; `site_pressure.parquet` no longer carries any behaviour columns.
+>
+> Net: the project carries **no archetype deliverable**. History of the clustering
+> approach kept below for the record.
 
 Chosen as the ML deliverable instead of the forecast because it studies the *shape* of demand, not volume — so network churn doesn't affect it.
 
@@ -67,3 +89,38 @@ Each charge point above a minimum session threshold gets a fingerprint: time-of-
 Current archetypes: Rapid top-up, AC commuter, AC public / retail, AC depot / long-stay.
 
 Planning value: the pressure index tells you *where* to build; clustering tells you *what* to build. Silhouette scores in this range mean soft boundaries — these are tendencies, not hard types. Fine for planning segmentation, but don't over-read individual assignments.
+
+---
+
+## Decision 5 — Site grain over local-authority grain (2026-06-13)
+
+The headline question — *where can we build more chargers?* — is a **siting** decision,
+and a local authority is the wrong unit for it. We moved the pressure index from LA grain
+to **charge-point (`cp_id`) grain**. Two reasons:
+
+1. **LA aggregation dilutes a concentrated signal.** Pressure is concentrated in a handful
+   of saturated sites surrounded by idle ones (median utilisation <1%). Averaging into an
+   LA mean drowns the saturated sites exactly where the signal is strongest.
+2. **It invites the ecological fallacy.** "West Dunbartonshire is rank #1" doesn't tell a
+   planner *which* site to expand. The site is the unit at which the decision is actually
+   made.
+
+This was a *removal*, not new machinery: `build_cp_metrics` already computed saturation,
+utilisation, and connector counts per `cp_id`; the LA roll-up (`aggregate_to_la`) was a
+lossy layer on top. The ranking function (`build_pressure_index`) is grain-agnostic, so it
+ranks sites unchanged. `aggregate_to_la`, `cluster_profiles.py`, and `pressure_index.py`
+were removed; the new entry point is [site_pressure.py](../src/site_pressure.py).
+
+**Decisions taken:**
+- **Session floor raised to 100** (`MIN_SESSIONS_SITE`, was 50) — at site grain a noisy
+  low-traffic charger can top the saturation ranking, so a stricter floor matters more.
+- **Single-connector sites flagged, not dropped.** At k=1 saturation equals utilisation,
+  so the weighted score double-counts one quantity. No redundancy is real pressure, so
+  they stay — flagged via `single_connector` and read with `n_connectors` in view.
+- **Ungeocoded sites dropped** (~27% geocoding miss). Geography is required to place a
+  charger; ungeocoded sites are excluded from the ranking, same as the old LA pipeline.
+  Coverage remains a known issue tracked in the README, not solved here.
+
+**Scope boundary:** this ranks where to **expand existing strained sites**. It cannot see
+net-new demand in places with no chargers (no sessions = invisible) — that would need
+demand denominators (EV registrations / population), which CPS session data alone lacks.
