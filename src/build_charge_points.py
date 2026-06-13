@@ -9,13 +9,16 @@ try:
     from pyspark.sql import SparkSession
     from pyspark.sql.types import (
         StructType, StructField,
-        StringType, DoubleType, TimestampType,
+        StringType, DoubleType, IntegerType, TimestampType,
     )
     from pyspark.dbutils import DBUtils
     spark = SparkSession.getActiveSession() or SparkSession.builder.getOrCreate()
     dbutils = DBUtils(spark)
+    # One row per physical connector. PK = (cp_id, connector_id).
     SILVER_SCHEMA = StructType([
         StructField("cp_id",               StringType(),    False),
+        StructField("connector_id",        StringType(),    False),
+        StructField("n_connectors",        IntegerType(),   False),
         StructField("site_name",           StringType(),    True),
         StructField("address",             StringType(),    True),
         StructField("city",                StringType(),    True),
@@ -55,6 +58,12 @@ def _latest_snapshot() -> str:
 
 
 def _flatten(locations: list) -> pd.DataFrame:
+    """One row per physical connector (EVSE connectors exploded).
+
+    cp_id = EVSE id; connector_id = the connector's id within the EVSE (joins to
+    sessions.connector); n_connectors = how many connectors the EVSE has. Connector
+    type/rate are read from the connector itself, not a representative pick.
+    """
     rows, skipped = [], 0
     for loc in locations:
         try:
@@ -69,28 +78,33 @@ def _flatten(locations: list) -> pd.DataFrame:
                 skipped += 1
                 continue
             connectors = evse.get("connectors", [])
-            if connectors:
-                # Pick connector with highest charge rate to represent the EVSE
-                best = max(connectors, key=lambda c: c.get("max_charge_rate") or 0)
-                connector_type = POWER_TYPE_MAP.get(best.get("power_type", ""), best.get("power_type"))
-                max_kw = best.get("max_charge_rate")
-            else:
-                connector_type, max_kw = None, None
-
-            rows.append({
-                "cp_id":              str(cp_id),
-                "site_name":          loc.get("name"),
-                "address":            loc.get("address"),
-                "city":               loc.get("city"),
-                "postcode":           loc.get("postal_code"),
-                "latitude":           lat,
-                "longitude":          lon,
-                "connector_type":     connector_type,
-                "max_charge_rate_kw": float(max_kw) if max_kw is not None else None,
-                "network_status":     evse.get("status"),
-            })
+            n_connectors = len(connectors)
+            if not connectors:
+                # No connector detail → nothing to key a row on (connector_id is PK).
+                skipped += 1
+                continue
+            for conn in connectors:
+                connector_id = conn.get("id")
+                if connector_id is None:
+                    skipped += 1
+                    continue
+                max_kw = conn.get("max_charge_rate")
+                rows.append({
+                    "cp_id":              str(cp_id),
+                    "connector_id":       str(connector_id),
+                    "n_connectors":       n_connectors,
+                    "site_name":          loc.get("name"),
+                    "address":            loc.get("address"),
+                    "city":               loc.get("city"),
+                    "postcode":           loc.get("postal_code"),
+                    "latitude":           lat,
+                    "longitude":          lon,
+                    "connector_type":     POWER_TYPE_MAP.get(conn.get("power_type", ""), conn.get("power_type")),
+                    "max_charge_rate_kw": float(max_kw) if max_kw is not None else None,
+                    "network_status":     evse.get("status"),
+                })
     if skipped:
-        logger.warning("Skipped %d locations with missing coordinates", skipped)
+        logger.warning("Skipped %d locations/EVSEs/connectors with missing coords, id, or connector detail", skipped)
     return pd.DataFrame(rows)
 
 
@@ -109,11 +123,14 @@ def main():
     df = _flatten(snap["data"])
     if len(df) < MIN_EXPECTED_EVSES:
         raise ValueError(
-            f"Only {len(df)} EVSEs after flatten (expected >= {MIN_EXPECTED_EVSES}). "
+            f"Only {len(df)} connectors after flatten (expected >= {MIN_EXPECTED_EVSES}). "
             "Aborting write — snapshot may be corrupt or incomplete."
         )
+    logger.info("Flattened to %d connector rows across %d charge points",
+                len(df), df["cp_id"].nunique())
     df["source_snapshot"] = path.rsplit("/", 1)[-1]
     df["ingested_at"] = pd.Timestamp.utcnow()
+    df["n_connectors"] = df["n_connectors"].astype("int32")  # match schema IntegerType
 
     required = [f.name for f in SILVER_SCHEMA.fields if not f.nullable and f.name in df.columns]
     before = len(df)
