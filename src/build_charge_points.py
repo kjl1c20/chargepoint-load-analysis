@@ -58,11 +58,14 @@ def _latest_snapshot() -> str:
 
 
 def _flatten(locations: list) -> pd.DataFrame:
-    """One row per physical connector (EVSE connectors exploded).
+    """One row per physical connector.
 
-    cp_id = EVSE id; connector_id = the connector's id within the EVSE (joins to
-    sessions.connector); n_connectors = how many connectors the EVSE has. Connector
-    type/rate are read from the connector itself, not a representative pick.
+    The feed lists each connector as its own EVSE entry, and entries that share the same
+    `id` are connectors of the same charge point (e.g. id "52118" appears twice, uid
+    "52118_1"/"52118_2", connector ids 1/2). So:
+      cp_id        = evse id (shared across an EVSE's connectors)
+      connector_id = the connector's id within the charge point (joins to sessions.connector)
+      n_connectors = how many distinct connectors share this cp_id (counted in a second pass)
     """
     rows, skipped = [], 0
     for loc in locations:
@@ -78,7 +81,6 @@ def _flatten(locations: list) -> pd.DataFrame:
                 skipped += 1
                 continue
             connectors = evse.get("connectors", [])
-            n_connectors = len(connectors)
             if not connectors:
                 # No connector detail → nothing to key a row on (connector_id is PK).
                 skipped += 1
@@ -92,7 +94,6 @@ def _flatten(locations: list) -> pd.DataFrame:
                 rows.append({
                     "cp_id":              str(cp_id),
                     "connector_id":       str(connector_id),
-                    "n_connectors":       n_connectors,
                     "site_name":          loc.get("name"),
                     "address":            loc.get("address"),
                     "city":               loc.get("city"),
@@ -105,7 +106,16 @@ def _flatten(locations: list) -> pd.DataFrame:
                 })
     if skipped:
         logger.warning("Skipped %d locations/EVSEs/connectors with missing coords, id, or connector detail", skipped)
-    return pd.DataFrame(rows)
+
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return df
+
+    # A connector can appear more than once across entries — keep one row per (cp_id, connector_id).
+    df = df.drop_duplicates(subset=["cp_id", "connector_id"], keep="first").reset_index(drop=True)
+    # n_connectors = distinct connectors sharing this cp_id (the real per-charge-point count).
+    df["n_connectors"] = df.groupby("cp_id")["connector_id"].transform("nunique").astype("int32")
+    return df
 
 
 def main():
@@ -130,7 +140,6 @@ def main():
                 len(df), df["cp_id"].nunique())
     df["source_snapshot"] = path.rsplit("/", 1)[-1]
     df["ingested_at"] = pd.Timestamp.utcnow()
-    df["n_connectors"] = df["n_connectors"].astype("int32")  # match schema IntegerType
 
     required = [f.name for f in SILVER_SCHEMA.fields if not f.nullable and f.name in df.columns]
     before = len(df)
@@ -139,6 +148,9 @@ def main():
     if dropped:
         logger.warning("Dropped %d rows with nulls in non-nullable fields", dropped)
 
+    # createDataFrame maps pandas → Spark by position, so align to the schema field order
+    # (n_connectors is appended last by the groupby above).
+    df = df[[f.name for f in SILVER_SCHEMA.fields]]
     sdf = spark.createDataFrame(df, schema=SILVER_SCHEMA)
     sdf.write.format("delta").mode("overwrite").option("overwriteSchema", "true").saveAsTable(SILVER_TABLE)
 
