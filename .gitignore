@@ -2,10 +2,3 @@ Sense Python/
 .env
 .vscode
 __pycache__/
-substation_map.html
-
-# Raw CPS spreadsheets — re-downloaded by the harvester each run.
-# Only the combined parquet (cps_sessions_all.parquet) is committed.
-data/raw_cps/
-
-data/reference/*.csv
