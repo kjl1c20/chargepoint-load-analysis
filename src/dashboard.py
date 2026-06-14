@@ -1,24 +1,28 @@
 """
 Scotland EV Charging — Infrastructure Planning Dashboard.
 
+Single interactive page: a demand-pressure map of every charge point; click a point to
+drill into that site's metrics and demand over time. Reads the Gold demand-pressure table
+and Silver sessions from Databricks via the SQL connector (aggregations pushed to SQL).
+
 Run:  poetry run streamlit run src/dashboard.py
+Needs in .env:  DATABRICKS_SERVER_HOSTNAME (or DATABRICKS_HOST), DATABRICKS_HTTP_PATH, DATABRICKS_TOKEN
 """
 
-from pathlib import Path
+import os
 
-import numpy as np
 import pandas as pd
 import plotly.express as px
-import plotly.graph_objects as go
 import streamlit as st
+from databricks import sql as dbsql
+from dotenv import load_dotenv
 
+load_dotenv()
 
 st.set_page_config(page_title="Scotland EV Charging — Planning", layout="wide")
 
-CLEAN_PATH = Path("./data/clean/cps_sessions_clean.parquet")
-SITE_PATH = Path("./data/processed/site_pressure.parquet")
-
-DOW = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+GOLD_TABLE = os.getenv("GOLD_SITE_PRESSURE_TABLE", "chargepoint_analysis.gold.site_pressure")
+SESSIONS_TABLE = os.getenv("SILVER_SESSIONS_TABLE", "chargepoint_analysis.silver.cps_sessions_clean")
 
 # Scottish postcode areas → place name, for the region filter
 AREA_NAMES = {
@@ -29,90 +33,112 @@ AREA_NAMES = {
 }
 ALL_REGIONS = "All Scotland"
 
-if not SITE_PATH.exists():
-    st.error(f"Missing {SITE_PATH}. Run site_pressure.py first.")
+
+# ============================================================
+# Databricks SQL connection + cached query helper
+# ============================================================
+
+def _conn_params():
+    host = (os.getenv("DATABRICKS_SERVER_HOSTNAME") or os.getenv("DATABRICKS_HOST") or "")
+    host = host.replace("https://", "").replace("http://", "").rstrip("/")
+    return host, os.getenv("DATABRICKS_HTTP_PATH"), os.getenv("DATABRICKS_TOKEN")
+
+
+HOST, HTTP_PATH, TOKEN = _conn_params()
+if not (HOST and HTTP_PATH and TOKEN):
+    st.error(
+        "Missing Databricks connection settings. Set DATABRICKS_SERVER_HOSTNAME "
+        "(or DATABRICKS_HOST), DATABRICKS_HTTP_PATH and DATABRICKS_TOKEN in .env."
+    )
     st.stop()
 
 
-# ============================================================
-# cached loaders / aggregations
-# ============================================================
+@st.cache_data(show_spinner="Querying Databricks…")
+def run_query(query: str) -> pd.DataFrame:
+    """Run a SQL query against the Databricks warehouse, return a pandas DataFrame."""
+    with dbsql.connect(server_hostname=HOST, http_path=HTTP_PATH, access_token=TOKEN) as conn:
+        with conn.cursor() as cur:
+            cur.execute(query)
+            return cur.fetchall_arrow().to_pandas()
+
 
 @st.cache_data
 def load_sites():
-    return pd.read_parquet(SITE_PATH)
-
-
-@st.cache_data
-def load_monthly():
-    df = pd.read_parquet(CLEAN_PATH, columns=["start_time", "cp_id", "consumption_kwh"])
-    df["month"] = pd.to_datetime(df["start_time"]).dt.to_period("M").astype(str)
-    g = df.groupby("month").agg(
-        sessions=("cp_id", "size"),
-        active_chargers=("cp_id", "nunique"),
-        energy_mwh=("consumption_kwh", lambda x: x.sum() / 1000)
-    ).reset_index()
-    g["sessions_per_charger"] = g["sessions"] / g["active_chargers"]
-    return g
-
-
-@st.cache_data
-def load_hour_dow():
-    t = pd.to_datetime(pd.read_parquet(CLEAN_PATH, columns=["start_time"])["start_time"])
-    h = pd.DataFrame({"hour": t.dt.hour, "dow": t.dt.dayofweek})
-    return h.groupby(["dow", "hour"]).size().unstack(fill_value=0).reindex(range(7))
-
-
-@st.cache_data
-def load_cp_months():
-    """Monthly session counts per charge point — for the single-site trend."""
-    df = pd.read_parquet(CLEAN_PATH, columns=["cp_id", "start_time"])
-    df["month"] = pd.to_datetime(df["start_time"]).dt.to_period("M").astype(str)
-    return df.groupby(["cp_id", "month"]).size().reset_index(name="sessions")
+    return run_query(f"SELECT * FROM {GOLD_TABLE}")
 
 
 @st.cache_data
 def load_totals():
-    df = pd.read_parquet(CLEAN_PATH, columns=["cp_id", "consumption_kwh", "amount", "start_time"])
+    r = run_query(f"""
+        SELECT count(*)                    AS sessions,
+               count(DISTINCT cp_id)       AS chargers,
+               sum(consumption_kwh) / 1000 AS energy_mwh,
+               sum(amount)                 AS revenue,
+               min(start_time)             AS date_min,
+               max(start_time)             AS date_max
+        FROM {SESSIONS_TABLE}
+    """).iloc[0]
     return {
-        "sessions": len(df),
-        "chargers": df["cp_id"].nunique(),
-        "energy_mwh": df["consumption_kwh"].sum() / 1000,
-        "revenue": df["amount"].sum(),
-        "date_min": pd.to_datetime(df["start_time"]).min().date(),
-        "date_max": pd.to_datetime(df["start_time"]).max().date(),
+        "sessions": int(r["sessions"]),
+        "chargers": int(r["chargers"]),
+        "energy_mwh": float(r["energy_mwh"]),
+        "revenue": float(r["revenue"]),
+        "date_min": pd.to_datetime(r["date_min"]).date(),
+        "date_max": pd.to_datetime(r["date_max"]).date(),
     }
 
 
+@st.cache_data
+def load_site_trend(cp_id: str):
+    """Monthly sessions for one charge point — queried on demand when a site is clicked."""
+    safe = cp_id.replace("'", "''")
+    return run_query(f"""
+        SELECT date_format(start_time, 'yyyy-MM') AS month, count(*) AS sessions
+        FROM {SESSIONS_TABLE}
+        WHERE cp_id = '{safe}'
+        GROUP BY date_format(start_time, 'yyyy-MM')
+        ORDER BY month
+    """)
+
+
+# ============================================================
+# Page
+# ============================================================
+
 sites = load_sites()
+totals = load_totals()
 
 st.title("Scotland EV Charging Profile Analysis")
-st.caption("ChargePlace Scotland public network · demand pressure by charge point (site)")
-
-tab1, tab2 = st.tabs(
-    ["Overview", "Per-Site Performance"]
+st.caption(
+    f"ChargePlace Scotland public network · demand pressure by charge point · "
+    f"{totals['date_min']} → {totals['date_max']}"
 )
 
-# ============================================================
-# Tab 1 — Overview (pressure map of every ranked site)
-# ============================================================
+# ---- network KPI strip ----
+k1, k2, k3, k4, k5 = st.columns(5)
+k1.metric("Charge points", f"{totals['chargers']:,}")
+k2.metric("Sessions", f"{totals['sessions']:,}")
+k3.metric("Energy", f"{totals['energy_mwh']:,.0f} MWh")
+k4.metric("Avg utilisation", f"{sites['utilisation'].mean():.1%}")
+k5.metric("Revenue (context)", f"£{totals['revenue']:,.0f}")
 
-with tab1:
-    st.subheader("Where is the network under pressure?")
-    st.caption(
-        "Ranked charge points, placed geographically and coloured by demand-pressure "
-        "score (saturation 60% + utilisation 40%, ranked relative to other sites). "
-        "Hotspots are individual sites, not whole council areas. Filter by postcode area "
-        "to focus on one region."
-    )
+st.divider()
 
-    # region filter by postcode area (G, EH, AB ...)
+# ---- map (left) + clicked-site detail (right) ----
+st.subheader("Where is the network under pressure?")
+st.caption(
+    "Each point is a charge point, coloured by demand-pressure score "
+    "(saturation 60% + utilisation 40%). **Click a point** to inspect that site."
+)
+
+map_col, detail_col = st.columns([3, 2], gap="large")
+
+with map_col:
     areas = sorted(sites["postcode_area"].dropna().unique())
     region = st.selectbox(
         "Postcode area",
         [ALL_REGIONS] + areas,
-        format_func=lambda a: a if a == ALL_REGIONS
-        else f"{a} — {AREA_NAMES.get(a, a)}",
+        format_func=lambda a: a if a == ALL_REGIONS else f"{a} — {AREA_NAMES.get(a, a)}",
     )
 
     mp = sites.dropna(subset=["latitude", "longitude"])
@@ -132,120 +158,71 @@ with tab1:
         size="pressure_score",
         size_max=18,
         hover_name="site_name",
-        custom_data=["pressure_rank", "utilisation", "saturation_rate",
-                     "n_connectors", "local_authority"],
+        custom_data=["cp_id", "pressure_rank", "postcode", "saturation_rate",
+                     "utilisation", "n_connectors"],
         mapbox_style="open-street-map",
         zoom=zoom,
         center=center,
-        height=720,
+        height=640,
     )
     fig_map.update_traces(
         hovertemplate=(
-            "<b>%{hovertext}</b> (Rank %{customdata[0]})<br>"
-            "%{customdata[4]}<br>"
+            "<b>%{hovertext}</b> (Rank %{customdata[1]})<br>"
+            "%{customdata[2]}<br>"
             "Pressure score: %{marker.color:.3f}<br>"
-            "Saturation rate: %{customdata[2]:.1%}<br>"
-            "Utilisation: %{customdata[1]:.1%}<br>"
-            "Connectors: %{customdata[3]}"
+            "Saturation rate: %{customdata[3]:.1%}<br>"
+            "Utilisation: %{customdata[4]:.1%}<br>"
+            "Connectors: %{customdata[5]}"
             "<extra></extra>"
         )
     )
-    fig_map.update_layout(margin=dict(t=0, b=0, l=0, r=0))
-    st.plotly_chart(fig_map, use_container_width=True)
+    fig_map.update_layout(margin=dict(t=0, b=0, l=0, r=0), coloraxis_colorbar=dict(title="Pressure"))
+
+    event = st.plotly_chart(
+        fig_map, use_container_width=True, on_select="rerun", key="pressure_map",
+        selection_mode="points",
+    )
+
     scope = ALL_REGIONS if region == ALL_REGIONS else f"{region} — {AREA_NAMES.get(region, region)}"
-    st.caption(f"{len(mp):,} charge points shown ({scope}) · "
-               "ungeocoded sites excluded; ~7% of ranked sites have no postcode area.")
+    st.caption(f"{len(mp):,} charge points shown ({scope}). Some ranked sites have no postcode area.")
 
-# ============================================================
-# Tab 2 — Per-Site Performance (network context + single-site drill-down)
-# ============================================================
+# resolve the clicked charge point (cp_id carried in customdata[0])
+selected_cp = None
+points = (event or {}).get("selection", {}).get("points", [])
+if points:
+    cd = points[0].get("customdata")
+    if cd:
+        selected_cp = cd[0]
 
-with tab2:
-    # ---- network-level performance context ----
-    t = load_totals()
-    st.caption(f"Analysis Period: {t['date_min']} → {t['date_max']}")
-    c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("Charge points", f"{t['chargers']:,}")
-    c2.metric("Sessions", f"{t['sessions']:,}")
-    c3.metric("Energy", f"{t['energy_mwh']:,.0f} MWh")
-    c4.metric("Avg utilisation (ranked sites)", f"{sites['utilisation'].mean():.1%}")
-    c5.metric("Revenue (context)", f"£{t['revenue']:,.0f}")
+with detail_col:
+    if selected_cp is None:
+        st.info("👈 Click a charge point on the map to see its sessions, energy, "
+                "utilisation, saturation and demand over time.")
+    else:
+        row = sites[sites["cp_id"] == selected_cp].iloc[0]
 
-    st.subheader("Demand over time")
-    st.caption("Total sessions fall as chargers migrate off the CPS network, but demand "
-               "*per charger* stays flat — the network is fragmenting, not shrinking in use.")
-    m = load_monthly()
-    fig = go.Figure()
-    fig.add_bar(x=m["month"], y=m["sessions"], name="Total sessions", marker_color="#9ecae1")
-    fig.add_scatter(x=m["month"], y=m["active_chargers"], name="Active chargers",
-                    yaxis="y2", line=dict(color="crimson"))
-    fig.update_layout(
-        yaxis=dict(title="Sessions"),
-        yaxis2=dict(title="Active chargers", overlaying="y", side="right", showgrid=False),
-        legend=dict(orientation="h"), height=360, margin=dict(t=10)
-    )
-    st.plotly_chart(fig, use_container_width=True)
+        st.markdown(f"### {row['site_name']}")
+        loc = row["postcode"] if pd.notna(row["postcode"]) else "—"
+        st.caption(f"{loc} · pressure rank #{int(row['pressure_rank'])} · "
+                   f"score {row['pressure_score']:.3f} · {int(row['n_connectors'])} connector(s)")
 
-    fig_pc = px.line(m, x="month", y="sessions_per_charger",
-                     title="Sessions per charger (real per-charger demand — flat)")
-    fig_pc.update_layout(height=280, margin=dict(t=40))
-    st.plotly_chart(fig_pc, use_container_width=True)
+        a1, a2 = st.columns(2)
+        a1.metric("Total sessions", f"{int(row['total_sessions']):,}")
+        a2.metric("Total energy", f"{row['total_energy_kwh'] / 1000:,.1f} MWh")
+        b1, b2 = st.columns(2)
+        b1.metric("Utilisation", f"{row['utilisation']:.1%}")
+        b2.metric("Saturation rate", f"{row['saturation_rate']:.1%}")
 
-    st.subheader("When is the network busiest?")
-    hd = load_hour_dow()
-    fig_h = px.imshow(hd.values, x=list(range(24)), y=DOW, aspect="auto",
-                      color_continuous_scale="OrRd", labels=dict(x="Hour", y="", color="Sessions"))
-    fig_h.update_layout(height=300, margin=dict(t=10))
-    st.plotly_chart(fig_h, use_container_width=True)
+        if bool(row["single_connector"]):
+            st.info("Single-connector site: saturation equals utilisation by construction, "
+                    "so its pressure score leans high.")
 
-    st.divider()
-
-    # ---- single-site drill-down ----
-    st.subheader("Inspect a single charge point")
-
-    ranked = sites.sort_values("pressure_score", ascending=False).reset_index(drop=True)
-    # cp_id is unique; site_name can repeat across charge points, so key the picker on cp_id.
-    options = ranked["cp_id"].tolist()
-    labels = {
-        r.cp_id: f"#{r.pressure_rank} · {r.site_name} — {r.local_authority}"
-        for r in ranked.itertuples()
-    }
-    pick = st.selectbox("Charge point (ranked by pressure)", options,
-                        format_func=lambda c: labels[c])
-    row = ranked[ranked["cp_id"] == pick].iloc[0]
-
-    d1, d2, d3, d4 = st.columns(4)
-    d1.metric("Pressure rank", f"#{int(row['pressure_rank'])}", f"score {row['pressure_score']:.3f}")
-    d2.metric("Saturation rate", f"{row['saturation_rate']:.1%}")
-    d3.metric("Utilisation", f"{row['utilisation']:.1%}")
-    d4.metric("Connectors", f"{int(row['n_connectors'])}",
-              "single — sat=util" if row["single_connector"] else None)
-    if row["single_connector"]:
-        st.info("Single-connector site: saturation equals utilisation by construction, so "
-                "its pressure score leans high. Real pressure (no redundancy), but read it "
-                "with that in mind.")
-
-    cm = load_cp_months()
-    site_m = cm[cm["cp_id"] == pick].sort_values("month")
-    fig_sm = px.line(site_m, x="month", y="sessions", markers=True,
-                     title="Sessions per month at this site")
-    fig_sm.update_layout(height=320, margin=dict(t=40))
-    st.plotly_chart(fig_sm, use_container_width=True)
-
-    st.divider()
-    st.subheader("Full ranking")
-    st.caption("All ranked charge points. This ranks where to **expand existing strained "
-               "sites** — it cannot see net-new demand where there are no chargers yet.")
-    st.dataframe(
-        ranked[["pressure_rank", "site_name", "local_authority", "pressure_score",
-                "saturation_rate", "utilisation", "n_connectors", "single_connector"]],
-        use_container_width=True, hide_index=True,
-        column_config={
-            "pressure_score": st.column_config.NumberColumn(format="%.3f"),
-            "saturation_rate": st.column_config.NumberColumn(format="%.3f"),
-            "utilisation": st.column_config.NumberColumn(format="%.3f"),
-        },
-    )
+        trend = load_site_trend(selected_cp)
+        fig_trend = px.area(trend, x="month", y="sessions", title="Demand over time")
+        fig_trend.update_traces(line_color="#d73027", fillcolor="rgba(215,48,39,0.15)")
+        fig_trend.update_layout(height=300, margin=dict(t=40, b=0, l=0, r=0),
+                                xaxis_title="", yaxis_title="Sessions / month")
+        st.plotly_chart(fig_trend, use_container_width=True)
 
 st.divider()
 st.caption("Data source: ChargePlace Scotland public session data · chargeplacescotland.org")
