@@ -122,7 +122,6 @@ def main():
             .otherwise(F.col("total_revenue") / F.col("n_connectors")),
         )
         .withColumn("single_connector", F.col("n_connectors") == 1)
-        .cache()  # reused by two counts + window + write; materialise the sweep-line once
     )
 
     before = cp.count()
