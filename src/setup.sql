@@ -50,7 +50,8 @@ CREATE TABLE IF NOT EXISTS chargepoint_analysis.silver.charge_points (
     site_name           STRING                COMMENT 'Site name from CPS feed',
     address             STRING                COMMENT 'Street address',
     city                STRING                COMMENT 'City',
-    postcode            STRING                COMMENT 'Postcode',
+    postcode            STRING                COMMENT 'Postcode (feed value, or approved override)',
+    postcode_source     STRING                COMMENT 'feed | override — lineage of the postcode value',
     latitude            DOUBLE                COMMENT 'WGS84 latitude',
     longitude           DOUBLE                COMMENT 'WGS84 longitude',
     connector_type      STRING                COMMENT 'AC or DC — per connector',
@@ -96,3 +97,62 @@ CREATE TABLE IF NOT EXISTS chargepoint_analysis.gold.site_pressure (
 )
 USING DELTA
 COMMENT 'Demand-Pressure Index per charge point — Gold layer. Built by site_pressure.py from Silver.';
+
+-- ============================================================
+-- REFERENCE (data-quality)
+-- ============================================================
+CREATE SCHEMA IF NOT EXISTS chargepoint_analysis.reference;
+
+-- Allowlist of valid Scottish postcode areas. Any charge point whose postcode area is not
+-- in this set is, for a Scotland-only network, an anomaly by definition.
+CREATE TABLE IF NOT EXISTS chargepoint_analysis.reference.postcode_areas (
+    area_code  STRING  NOT NULL  COMMENT 'Postcode area (leading letters)',
+    area_name  STRING  NOT NULL  COMMENT 'Place name for the area',
+    CONSTRAINT postcode_areas_pk PRIMARY KEY (area_code)
+)
+USING DELTA
+COMMENT 'Valid Scottish postcode areas — reference allowlist for postcode validation.';
+
+-- Idempotent seed of the 16 Scottish postcode areas. INSERT INTO WILL KEEP ADDING NEW REPEATED AREAS TO THE TABLE IF RERUN.
+MERGE INTO chargepoint_analysis.reference.postcode_areas AS t
+USING (
+    SELECT * FROM VALUES
+        ('AB', 'Aberdeen'),        ('DD', 'Dundee'),         ('DG', 'Dumfries'),
+        ('EH', 'Edinburgh'),       ('FK', 'Falkirk'),        ('G',  'Glasgow'),
+        ('HS', 'Outer Hebrides'),  ('IV', 'Inverness'),      ('KA', 'Kilmarnock'),
+        ('KW', 'Kirkwall'),        ('KY', 'Kirkcaldy'),      ('ML', 'Motherwell'),
+        ('PA', 'Paisley'),         ('PH', 'Perth'),          ('TD', 'Borders'),
+        ('ZE', 'Shetland')
+    AS v(area_code, area_name)
+) AS s
+ON t.area_code = s.area_code
+WHEN NOT MATCHED THEN INSERT (area_code, area_name) VALUES (s.area_code, s.area_name);
+
+-- Curated, human-approved postcode corrections. Applied fix-on-read by build_charge_points.py
+-- (Bronze stays immutable). One row per charge point.
+CREATE TABLE IF NOT EXISTS chargepoint_analysis.reference.postcode_overrides (
+    cp_id               STRING    NOT NULL  COMMENT 'Charge point (EVSE) identifier',
+    corrected_postcode  STRING    NOT NULL  COMMENT 'Approved correct postcode',
+    reason              STRING              COMMENT 'Why the feed value was wrong',
+    corrected_by        STRING              COMMENT 'Who approved the correction',
+    corrected_at        TIMESTAMP           COMMENT 'When the correction was approved (UTC)',
+    CONSTRAINT postcode_overrides_pk PRIMARY KEY (cp_id)
+)
+USING DELTA
+COMMENT 'Human-approved postcode corrections — applied fix-on-read when building Silver.';
+
+-- Generic data-quality findings register. Every pipeline check writes here (one producer
+-- today: postcode triangulation). Fixed columns stay thin; check-specific payload lives in
+-- the `details` JSON, so new checks reuse the table without schema changes.
+CREATE TABLE IF NOT EXISTS chargepoint_analysis.reference.dq_findings (
+    check_name   STRING    NOT NULL  COMMENT 'Check id, encodes table+rule e.g. charge_points.postcode_triangulation',
+    entity_id    STRING    NOT NULL  COMMENT 'Key of the offending row (cp_id, or composite key as text)',
+    message      STRING              COMMENT 'Human-readable: what is wrong (carries the bad value + rule)',
+    details      STRING              COMMENT 'JSON: check-specific payload (coord_postcode, suggested_postcode/address, ...)',
+    status       STRING              COMMENT 'open | resolved | dismissed',
+    detected_at  TIMESTAMP           COMMENT 'When first flagged (UTC)',
+    resolved_at  TIMESTAMP           COMMENT 'When closed (UTC), null while open',
+    CONSTRAINT dq_findings_pk PRIMARY KEY (check_name, entity_id)
+)
+USING DELTA
+COMMENT 'Pipeline data-quality findings register. Written by dq_postcodes.py (and future checks).';

@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 import pandas as pd
 
 try:
-    from pyspark.sql import SparkSession
+    from pyspark.sql import SparkSession, functions as F
     from pyspark.sql.types import (
         StructType, StructField,
         StringType, DoubleType, IntegerType, TimestampType,
@@ -23,6 +23,7 @@ try:
         StructField("address",             StringType(),    True),
         StructField("city",                StringType(),    True),
         StructField("postcode",            StringType(),    True),
+        StructField("postcode_source",     StringType(),    True),
         StructField("latitude",            DoubleType(),    True),
         StructField("longitude",           DoubleType(),    True),
         StructField("connector_type",      StringType(),    True),
@@ -34,6 +35,7 @@ try:
 except Exception:
     spark = None
     dbutils = None
+    F = None
     SILVER_SCHEMA = None
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
@@ -41,6 +43,7 @@ logger = logging.getLogger(__name__)
 
 BRONZE_PATH = os.getenv("LOCATIONS_VOLUME_PATH", "/Volumes/chargepoint_analysis/bronze/locations")
 SILVER_TABLE = os.getenv("SILVER_CP_TABLE", "chargepoint_analysis.silver.charge_points")
+OVERRIDES_TABLE = os.getenv("POSTCODE_OVERRIDES_TABLE", "chargepoint_analysis.reference.postcode_overrides")
 
 POWER_TYPE_MAP = {"AC_1_PHASE": "AC", "AC_2_PHASE": "AC", "AC_3_PHASE": "AC", "DC": "DC"}
 MIN_EXPECTED_EVSES = int(os.getenv("MIN_EXPECTED_EVSES", "1000"))
@@ -118,6 +121,31 @@ def _flatten(locations: list) -> pd.DataFrame:
     return df
 
 
+def _apply_overrides(sdf):
+    """Fix-on-read: replace the feed postcode with an approved override where one exists.
+
+    Deterministic join — Bronze is never mutated. Empty/absent overrides table = no-op.
+    """
+    try:
+        overrides = spark.table(OVERRIDES_TABLE).select("cp_id", "corrected_postcode")
+    except Exception as e:
+        logger.warning("Overrides table %s unavailable (%s) — keeping all feed postcodes",
+                       OVERRIDES_TABLE, e)
+        return sdf
+
+    out = (
+        sdf.join(F.broadcast(overrides), "cp_id", "left")
+        .withColumn("postcode", F.coalesce(F.col("corrected_postcode"), F.col("postcode")))
+        .withColumn("postcode_source",
+                    F.when(F.col("corrected_postcode").isNotNull(), F.lit("override"))
+                     .otherwise(F.lit("feed")))
+        .drop("corrected_postcode")
+    )
+    n_override = out.filter(F.col("postcode_source") == "override").select("cp_id").distinct().count()
+    logger.info("Applied postcode overrides to %d charge point(s)", n_override)
+    return out
+
+
 def main():
     if spark is None or dbutils is None:
         raise RuntimeError("PySpark/dbutils not available — run in Databricks")
@@ -140,6 +168,7 @@ def main():
                 len(df), df["cp_id"].nunique())
     df["source_snapshot"] = path.rsplit("/", 1)[-1]
     df["ingested_at"] = pd.Timestamp.utcnow()
+    df["postcode_source"] = "feed"  # may flip to 'override' below
 
     required = [f.name for f in SILVER_SCHEMA.fields if not f.nullable and f.name in df.columns]
     before = len(df)
@@ -152,6 +181,7 @@ def main():
     # (n_connectors is appended last by the groupby above).
     df = df[[f.name for f in SILVER_SCHEMA.fields]]
     sdf = spark.createDataFrame(df, schema=SILVER_SCHEMA)
+    sdf = _apply_overrides(sdf)
     sdf.write.format("delta").mode("overwrite").option("overwriteSchema", "true").saveAsTable(SILVER_TABLE)
 
     logger.info("Written %d rows to %s", len(df), SILVER_TABLE)
