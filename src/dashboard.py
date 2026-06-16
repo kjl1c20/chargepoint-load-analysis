@@ -1,287 +1,426 @@
 """
 Scotland EV Charging — Infrastructure Planning Dashboard.
 
+Single interactive page: a demand-pressure map of every charge point; click a point to
+drill into that site's metrics and demand over time. Reads the Gold demand-pressure table
+and Silver sessions from Databricks via the SQL connector (aggregations pushed to SQL).
+
 Run:  poetry run streamlit run src/dashboard.py
+Needs in .env:  DATABRICKS_SERVER_HOSTNAME (or DATABRICKS_HOST), DATABRICKS_HTTP_PATH, DATABRICKS_TOKEN
+Map: tokenless MapLibre basemap (no Mapbox token required).
 """
 
-from pathlib import Path
+import os
+from concurrent.futures import ThreadPoolExecutor
 
-import numpy as np
 import pandas as pd
 import plotly.express as px
-import plotly.graph_objects as go
+import pydeck as pdk
 import streamlit as st
+from databricks import sql as dbsql
+from dotenv import load_dotenv
 
+load_dotenv()
 
 st.set_page_config(page_title="Scotland EV Charging — Planning", layout="wide")
 
-CLEAN_PATH = Path("./data/clean/cps_sessions_clean.parquet")
-INDEX_PATH = Path("./data/processed/pressure_index.parquet")
-CLUSTERS_PATH = Path("./data/processed/cp_clusters.parquet")
+GOLD_TABLE = os.getenv("GOLD_SITE_PRESSURE_TABLE", "chargepoint_analysis.gold.site_pressure")
+SESSIONS_TABLE = os.getenv("SILVER_SESSIONS_TABLE", "chargepoint_analysis.silver.cps_sessions_clean")
 
-TIME_SHARES = ["pct_morning", "pct_midday", "pct_evening", "pct_overnight"]
+# Map rendering with pydeck (deck.gl). Tokenless Carto basemap; the selected site is marked
+# with a real teardrop pin via IconLayer using deck.gl's stock marker atlas (mask=True lets
+# us tint it). Sites are a ScatterplotLayer coloured by pressure (OrRd ramp), pickable so a
+# click selects a site.
+MAP_STYLE = os.getenv("MAP_STYLE", "light")  # pydeck/Carto style: light | dark | road | ...
+PIN_ATLAS = "https://raw.githubusercontent.com/visgl/deck.gl-data/master/website/icon-atlas.png"
+PIN_MAPPING = {"marker": {"x": 0, "y": 0, "width": 128, "height": 128, "anchorY": 128, "mask": True}}
+PIN_COLOR = [31, 120, 180]  # blue teardrop for the selected site
+
+# OrRd colour ramp (matches the old plotly scale) — pressure_score (0–1) → [r, g, b].
+_ORRD = [(255, 247, 236), (253, 212, 158), (253, 141, 60), (227, 74, 51), (179, 0, 0)]
+
+
+def _orrd_rgb(t: float) -> list:
+    """Interpolate the OrRd ramp at t∈[0,1] → [r, g, b]."""
+    if t is None or pd.isna(t):
+        return [180, 180, 180]
+    t = min(max(float(t), 0.0), 1.0)
+    pos = t * (len(_ORRD) - 1)
+    i = int(pos)
+    if i >= len(_ORRD) - 1:
+        return list(_ORRD[-1])
+    f = pos - i
+    a, b = _ORRD[i], _ORRD[i + 1]
+    return [round(a[c] + (b[c] - a[c]) * f) for c in range(3)]
+
+# Scottish postcode areas → place name, for the region filter
+AREA_NAMES = {
+    "AB": "Aberdeen", "DD": "Dundee", "DG": "Dumfries", "EH": "Edinburgh",
+    "FK": "Falkirk", "G": "Glasgow", "HS": "Outer Hebrides", "IV": "Inverness",
+    "KA": "Kilmarnock", "KW": "Kirkwall", "KY": "Kirkcaldy", "ML": "Motherwell",
+    "PA": "Paisley", "PH": "Perth", "TD": "Borders", "ZE": "Shetland",
+}
+ALL_REGIONS = "All Scotland"
 DOW = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
-
-for p in (INDEX_PATH, CLUSTERS_PATH):
-    if not p.exists():
-        st.error(f"Missing {p}. Run pressure_index.py and cluster_profiles.py first.")
-        st.stop()
+# Session-length bands, ordered long → short so the heatmap shows long stays at the top.
+DUR_BANDS = ["8h+", "4-8h", "2-4h", "1-2h", "30-60m", "<30m"]
 
 
 # ============================================================
-# cached loaders / aggregations
+# Databricks SQL connection + cached query helper
 # ============================================================
 
-@st.cache_data
-def load_index():
-    return pd.read_parquet(INDEX_PATH)
+def _conn_params():
+    host = (os.getenv("DATABRICKS_SERVER_HOSTNAME") or os.getenv("DATABRICKS_HOST") or "")
+    host = host.replace("https://", "").replace("http://", "").rstrip("/")
+    return host, os.getenv("DATABRICKS_HTTP_PATH"), os.getenv("DATABRICKS_TOKEN")
+
+
+HOST, HTTP_PATH, TOKEN = _conn_params()
+if not (HOST and HTTP_PATH and TOKEN):
+    st.error(
+        "Missing Databricks connection settings. Set DATABRICKS_SERVER_HOSTNAME "
+        "(or DATABRICKS_HOST), DATABRICKS_HTTP_PATH and DATABRICKS_TOKEN in .env."
+    )
+    st.stop()
+
+
+@st.cache_data(show_spinner="Querying Databricks…")
+def run_query(query: str) -> pd.DataFrame:
+    """Run a SQL query against the Databricks warehouse, return a pandas DataFrame."""
+    with dbsql.connect(server_hostname=HOST, http_path=HTTP_PATH, access_token=TOKEN) as conn:
+        with conn.cursor() as cur:
+            cur.execute(query)
+            return cur.fetchall_arrow().to_pandas()
 
 
 @st.cache_data
-def load_clusters():
-    return pd.read_parquet(CLUSTERS_PATH)
+def load_sites():
+    return run_query(f"SELECT * FROM {GOLD_TABLE}")
 
 
 @st.cache_data
-def load_monthly():
-    df = pd.read_parquet(CLEAN_PATH, columns=["start_time", "cp_id", "consumption_kwh"])
-    df["month"] = pd.to_datetime(df["start_time"]).dt.to_period("M").astype(str)
-    g = df.groupby("month").agg(
-        sessions=("cp_id", "size"),
-        active_chargers=("cp_id", "nunique"),
-        energy_mwh=("consumption_kwh", lambda x: x.sum() / 1000)
-    ).reset_index()
-    g["sessions_per_charger"] = g["sessions"] / g["active_chargers"]
+def load_period():
+    r = run_query(
+        f"SELECT min(start_time) AS date_min, max(start_time) AS date_max FROM {SESSIONS_TABLE}"
+    ).iloc[0]
+    return pd.to_datetime(r["date_min"]).date(), pd.to_datetime(r["date_max"]).date()
+
+
+def _in_clause(cp_ids: tuple) -> str:
+    return ", ".join("'" + str(c).replace("'", "''") + "'" for c in cp_ids)
+
+
+@st.cache_data
+def load_site_profile(cp_ids: tuple):
+    """Sessions by weekday × hour for a site's charge points — drives both daily charts."""
+    return run_query(f"""
+        SELECT weekday(start_time) AS dow, hour(start_time) AS hour, count(*) AS sessions
+        FROM {SESSIONS_TABLE}
+        WHERE cp_id IN ({_in_clause(cp_ids)})
+        GROUP BY weekday(start_time), hour(start_time)
+    """)
+
+
+@st.cache_data
+def load_site_daycounts(cp_ids: tuple):
+    """Distinct weekday vs weekend dates for a site — to normalise the average profile."""
+    return run_query(f"""
+        SELECT CASE WHEN weekday(start_time) >= 5 THEN 'Weekend' ELSE 'Weekday' END AS day_type,
+               count(DISTINCT to_date(start_time)) AS days
+        FROM {SESSIONS_TABLE}
+        WHERE cp_id IN ({_in_clause(cp_ids)})
+        GROUP BY CASE WHEN weekday(start_time) >= 5 THEN 'Weekend' ELSE 'Weekday' END
+    """)
+
+
+@st.cache_data
+def load_site_hour_duration(cp_ids: tuple):
+    """Session counts by hour of day × session-length band — the combined timing/length heatmap."""
+    band = """CASE
+                WHEN duration_minutes < 30  THEN '<30m'
+                WHEN duration_minutes < 60  THEN '30-60m'
+                WHEN duration_minutes < 120 THEN '1-2h'
+                WHEN duration_minutes < 240 THEN '2-4h'
+                WHEN duration_minutes < 480 THEN '4-8h'
+                ELSE '8h+'
+              END"""
+    return run_query(f"""
+        SELECT hour(start_time) AS hour, {band} AS dur_band, count(*) AS sessions
+        FROM {SESSIONS_TABLE}
+        WHERE cp_id IN ({_in_clause(cp_ids)})
+        GROUP BY hour(start_time), {band}
+    """)
+
+
+@st.cache_data
+def load_site_trend(cp_ids: tuple):
+    """Monthly sessions across all charge points at a site — queried when a site is clicked."""
+    return run_query(f"""
+        SELECT date_format(start_time, 'yyyy-MM') AS month, count(*) AS sessions
+        FROM {SESSIONS_TABLE}
+        WHERE cp_id IN ({_in_clause(cp_ids)})
+        GROUP BY date_format(start_time, 'yyyy-MM')
+        ORDER BY month
+    """)
+
+
+def load_site_bundle(cp_ids: tuple) -> dict:
+    """Fetch all four per-site datasets concurrently — each is an independent Databricks
+    round-trip (its own connection), so firing them in parallel cuts first-click latency
+    from the sum of 4 round-trips to roughly the slowest one. Each loader still has its own
+    @st.cache_data, so a repeat selection skips the network entirely regardless."""
+    loaders = {
+        "trend": load_site_trend,
+        "profile": load_site_profile,
+        "hour_duration": load_site_hour_duration,
+        "daycounts": load_site_daycounts,
+    }
+    with ThreadPoolExecutor(max_workers=len(loaders)) as ex:
+        futures = {name: ex.submit(fn, cp_ids) for name, fn in loaders.items()}
+        return {name: f.result() for name, f in futures.items()}
+
+
+@st.cache_data
+def build_site_view(cp: pd.DataFrame) -> pd.DataFrame:
+    """Aggregate the per-cp_id gold table to one row per physical site (location).
+
+    Charge points at the same coordinates are one site. Rates are recomputed from summed
+    hours (not averaged), and pressure is re-ranked across sites.
+    """
+    g = (
+        cp.groupby(["latitude", "longitude"], dropna=False)
+        .agg(
+            site_name=("site_name", "first"),
+            postcode=("postcode", "first"),
+            postcode_area=("postcode_area", "first"),
+            n_charge_points=("cp_id", "nunique"),
+            n_connectors=("n_connectors", "sum"),
+            total_sessions=("total_sessions", "sum"),
+            total_energy_kwh=("total_energy_kwh", "sum"),
+            total_revenue=("total_revenue", "sum"),
+            occupied_hours=("occupied_hours", "sum"),
+            available_connector_hours=("available_connector_hours", "sum"),
+            saturated_hours=("saturated_hours", "sum"),
+            cp_available_hours=("cp_available_hours", "sum"),
+            cp_ids=("cp_id", lambda s: tuple(s)),
+        )
+        .reset_index()
+    )
+    denom_u = g["available_connector_hours"].where(g["available_connector_hours"] > 0)
+    g["utilisation"] = (g["occupied_hours"] / denom_u).fillna(0).clip(upper=1.0)
+    denom_s = g["cp_available_hours"].where(g["cp_available_hours"] > 0)
+    g["saturation_rate"] = (g["saturated_hours"] / denom_s).fillna(0)
+    g["pressure_score"] = (
+        0.6 * g["saturation_rate"].rank(pct=True) + 0.4 * g["utilisation"].rank(pct=True)
+    )
+    g["pressure_rank"] = g["pressure_score"].rank(ascending=False, method="min").astype(int)
+    g["site_key"] = g["latitude"].round(6).astype(str) + "," + g["longitude"].round(6).astype(str)
     return g
 
 
-@st.cache_data
-def load_hour_dow():
-    t = pd.to_datetime(pd.read_parquet(CLEAN_PATH, columns=["start_time"])["start_time"])
-    h = pd.DataFrame({"hour": t.dt.hour, "dow": t.dt.dayofweek})
-    return h.groupby(["dow", "hour"]).size().unstack(fill_value=0).reindex(range(7))
+# ============================================================
+# Page
+# ============================================================
+
+def render_detail(row, bundle=None):
+    """The clicked-site card: site-level metrics + demand-over-time."""
+    if row is None:
+        st.info("Click a site on the map to inspect its sessions, energy, revenue, "
+                "utilisation, saturation and demand over time.")
+        return
+
+    name = row["site_name"] if pd.notna(row["site_name"]) else "Unnamed site"
+    st.markdown(f"### {name}")
+    loc = row["postcode"] if pd.notna(row["postcode"]) else "—"
+    st.caption(f"{loc} · pressure rank #{int(row['pressure_rank'])} · "
+               f"score {row['pressure_score']:.3f} · "
+               f"{int(row['n_charge_points'])} charge point(s) · {int(row['n_connectors'])} connectors")
+
+    a1, a2, a3 = st.columns(3)
+    a1.metric("Total sessions", f"{int(row['total_sessions']):,}")
+    a2.metric("Total energy", f"{row['total_energy_kwh'] / 1000:,.1f} MWh")
+    a3.metric("Total revenue", f"£{row['total_revenue']:,.0f}")
+    b1, b2 = st.columns(2)
+    b1.metric("Utilisation", f"{row['utilisation']:.1%}")
+    b2.metric("Saturation rate", f"{row['saturation_rate']:.1%}")
+
+    trend = bundle["trend"]
+    fig_trend = px.area(trend, x="month", y="sessions", title="Demand over time")
+    fig_trend.update_traces(line_color="#d73027", fillcolor="rgba(215,48,39,0.15)")
+    fig_trend.update_layout(height=290, margin=dict(t=40, b=0, l=0, r=0),
+                            xaxis_title="", yaxis_title="Sessions / month")
+    st.plotly_chart(fig_trend, use_container_width=True)
 
 
-@st.cache_data
-def load_totals():
-    df = pd.read_parquet(CLEAN_PATH, columns=["cp_id", "consumption_kwh", "amount", "start_time"])
-    return {
-        "sessions": len(df),
-        "chargers": df["cp_id"].nunique(),
-        "energy_mwh": df["consumption_kwh"].sum() / 1000,
-        "revenue": df["amount"].sum(),
-        "date_min": pd.to_datetime(df["start_time"]).min().date(),
-        "date_max": pd.to_datetime(df["start_time"]).max().date(),
-    }
+def render_site_profiles(row, bundle):
+    """Per-site charging profile: hour×day heatmap, hour×duration heatmap, weekday vs weekend."""
+    if row is None:
+        return
+    name = row["site_name"] if pd.notna(row["site_name"]) else "this site"
+    st.markdown(f"#### When does **{name}** get used?")
+
+    prof = bundle["profile"]
+    p1, p2 = st.columns(2, gap="large")
+
+    with p1:
+        st.caption("Sessions by hour and day of week")
+        mat = (prof.pivot(index="dow", columns="hour", values="sessions")
+               .reindex(range(7)).reindex(columns=range(24)).fillna(0))
+        fig_h = px.imshow(
+            mat.values, x=list(range(24)), y=DOW, aspect="auto",
+            color_continuous_scale="OrRd", labels=dict(x="Hour of day", y="", color="Sessions"),
+        )
+        fig_h.update_layout(height=300, margin=dict(t=10, b=0, l=0, r=0))
+        st.plotly_chart(fig_h, use_container_width=True)
+
+    with p2:
+        st.caption("When do long vs short sessions happen?")
+        hd = bundle["hour_duration"]
+        mat2 = (hd.pivot(index="dur_band", columns="hour", values="sessions")
+                .reindex(DUR_BANDS).reindex(columns=range(24)).fillna(0))
+        fig_hd = px.imshow(
+            mat2.values, x=list(range(24)), y=DUR_BANDS, aspect="auto",
+            color_continuous_scale="OrRd",
+            labels=dict(x="Hour of day", y="Session length", color="Sessions"),
+        )
+        fig_hd.update_layout(height=300, margin=dict(t=10, b=0, l=0, r=0))
+        st.plotly_chart(fig_hd, use_container_width=True)
+
+    st.caption("Average charging profile — weekday vs weekend")
+    agg = prof.copy()
+    agg["day_type"] = agg["dow"].apply(lambda d: "Weekend" if d >= 5 else "Weekday")
+    agg = agg.groupby(["day_type", "hour"], as_index=False)["sessions"].sum()
+    days = bundle["daycounts"].set_index("day_type")["days"].to_dict()
+    agg["avg_sessions"] = agg.apply(lambda r: r["sessions"] / days.get(r["day_type"], 1), axis=1)
+    fig_w = px.line(
+        agg, x="hour", y="avg_sessions", color="day_type", markers=True,
+        color_discrete_map={"Weekday": "#4575b4", "Weekend": "#d73027"},
+    )
+    fig_w.update_layout(
+        height=280, margin=dict(t=10, b=0, l=0, r=0),
+        xaxis_title="Hour of day", yaxis_title="Avg sessions / day", legend_title="",
+        legend=dict(orientation="h", yanchor="bottom", y=1.0, xanchor="right", x=1.0),
+    )
+    st.plotly_chart(fig_w, use_container_width=True)
 
 
-index = load_index()
-clusters = load_clusters()
+@st.fragment
+def map_and_detail():
+    """Map + detail. Pick a site by name or by clicking the map; one site is preselected.
+    Defaults to the first postcode area (showing all of Scotland at once isn't useful)."""
+    map_col, detail_col = st.columns([3, 2], gap="large")
 
-# dominant archetype per local authority (for map + priorities)
-geo_clusters = clusters.dropna(subset=["local_authority"])
-dominant = (
-    geo_clusters.groupby("local_authority")["archetype"]
-    .agg(lambda s: s.mode().iloc[0])
-    .rename("dominant_archetype")
-)
+    with map_col:
+        areas = sorted(site_view["postcode_area"].dropna().unique())
+        region = st.selectbox(
+            "Postcode area", areas,
+            format_func=lambda a: f"{a} — {AREA_NAMES.get(a, a)}",
+        )
+        st.caption("Click a site on the map to inspect its sessions, energy, revenue, "
+                   "utilisation, saturation and demand over time.")
+
+        mp = (site_view[(site_view["postcode_area"] == region)
+                        & site_view["latitude"].notna() & site_view["longitude"].notna()]
+              .sort_values("pressure_rank"))
+        option_keys = mp["site_key"].tolist()
+        name_by_key = dict(zip(mp["site_key"], mp["site_name"]))
+
+        if mp.empty:
+            st.info(f"No sites with coordinates in {region}.")
+            return
+
+        # A map click (stored in session_state by on_select) preselects that site in the box.
+        # pydeck returns clicked rows under selection.objects[<layer id>]; gated by _applied_click
+        # so a stale click can't fight a manual dropdown change.
+        sitebox_key = f"sitebox::{region}"
+        sel_state = st.session_state.get("pressure_map") or {}
+        hits = ((sel_state.get("selection") or {}).get("objects") or {}).get("sites") or []
+        clicked = hits[0].get("site_key") if hits else None
+        if clicked in option_keys and clicked != st.session_state.get("_applied_click"):
+            st.session_state[sitebox_key] = clicked
+            st.session_state["_applied_click"] = clicked
+
+        selected_key = st.selectbox(
+            "Site", option_keys, format_func=lambda k: name_by_key.get(k, k), key=sitebox_key,
+        )
+        sel = mp[mp["site_key"] == selected_key]
+
+        # Render frame: per-point OrRd colour + pre-formatted tooltip fields (deck.gl tooltips
+        # can't format numbers, so we format them here).
+        mp_r = mp.copy()
+        mp_r["fill_color"] = mp_r["pressure_score"].apply(lambda v: _orrd_rgb(v) + [200])
+        mp_r["score_disp"] = mp_r["pressure_score"].map(lambda v: f"{v:.3f}" if pd.notna(v) else "—")
+        mp_r["sat_disp"] = mp_r["saturation_rate"].map(lambda v: f"{v * 100:.1f}%" if pd.notna(v) else "—")
+        mp_r["util_disp"] = mp_r["utilisation"].map(lambda v: f"{v * 100:.1f}%" if pd.notna(v) else "—")
+
+        sites_layer = pdk.Layer(
+            "ScatterplotLayer", data=mp_r, id="sites", pickable=True, auto_highlight=True,
+            get_position=["longitude", "latitude"], get_fill_color="fill_color",
+            get_radius=120, radius_min_pixels=6, radius_max_pixels=16,
+            stroked=True, get_line_color=[255, 255, 255], line_width_min_pixels=0.5,
+        )
+        layers = [sites_layer]
+        if not sel.empty:  # real teardrop pin on the selected site (deck.gl marker atlas)
+            layers.append(pdk.Layer(
+                "IconLayer", data=sel.assign(icon="marker"), get_icon="icon",
+                get_position=["longitude", "latitude"], get_size=4, size_scale=15,
+                get_color=PIN_COLOR, icon_atlas=PIN_ATLAS, icon_mapping=PIN_MAPPING,
+                pickable=False,
+            ))
+
+        deck = pdk.Deck(
+            layers=layers, map_provider="carto", map_style=MAP_STYLE,
+            initial_view_state=pdk.ViewState(
+                latitude=float(mp["latitude"].mean()),
+                longitude=float(mp["longitude"].mean()), zoom=8.5),
+            tooltip={
+                "html": (
+                    "<b>{site_name}</b> (Rank {pressure_rank})<br/>"
+                    "{postcode}<br/>"
+                    "Pressure score: {score_disp}<br/>"
+                    "Saturation rate: {sat_disp}<br/>"
+                    "Utilisation: {util_disp}<br/>"
+                    "{n_charge_points} charge point(s) · {n_connectors} connectors"
+                ),
+                "style": {"backgroundColor": "#262730", "color": "white", "fontSize": "0.8rem"},
+            },
+        )
+        st.pydeck_chart(deck, use_container_width=True, height=640,  # native trackpad/scroll zoom
+                        on_select="rerun", selection_mode="single-object", key="pressure_map")
+        st.caption(f"{len(mp):,} sites in {region} — {AREA_NAMES.get(region, region)}.")
+
+    site_row = sel.iloc[0] if not sel.empty else None
+    # One concurrent fetch shared by both render functions below — avoids firing the same
+    # 4 queries twice and means render_detail/render_site_profiles never block each other.
+    bundle = load_site_bundle(site_row["cp_ids"]) if site_row is not None else None
+
+    with detail_col:
+        with st.container(border=True):
+            render_detail(site_row, bundle)
+
+    if site_row is not None:
+        st.markdown("")
+        render_site_profiles(site_row, bundle)
+
+
+sites = load_sites()
+site_view = build_site_view(sites)
+date_min, date_max = load_period()
 
 st.title("Scotland EV Charging Profile Analysis")
-st.caption("ChargePlace Scotland public network · demand pressure & charging archetypes aggregated by local authority")
-
-tab1, tab2, tab3, tab4 = st.tabs(
-    ["Overview", "Demand Pressure", "Demand Archetypes", "Planning Priorities"]
+st.caption(
+    f"ChargePlace Scotland public network · demand pressure by site · "
+    f"{date_min} → {date_max}"
 )
 
-# ============================================================
-# Tab 1 — Overview
-# ============================================================
+st.subheader("Where is the network under pressure?")
+st.caption(
+    "Each point is a **site** (the charge points at one location), coloured by demand-pressure "
+    "score (saturation 60% + utilisation 40%)."
+)
 
-with tab1:
-    t = load_totals()
-    st.caption(f"Analysis Period: {t['date_min']} → {t['date_max']}")
-    c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("Charge points", f"{t['chargers']:,}")
-    c2.metric("Sessions", f"{t['sessions']:,}")
-    c3.metric("Energy", f"{t['energy_mwh']:,.0f} MWh")
-    c4.metric("Avg utilisation", f"{index['utilisation'].mean():.1%}")
-    c5.metric("Revenue (context)", f"£{t['revenue']:,.0f}")
-
-    st.subheader("Demand over time")
-    m = load_monthly()
-    fig = go.Figure()
-    fig.add_bar(x=m["month"], y=m["sessions"], name="Total sessions", marker_color="#9ecae1")
-    fig.add_scatter(x=m["month"], y=m["active_chargers"], name="Active chargers",
-                    yaxis="y2", line=dict(color="crimson"))
-    fig.update_layout(
-        yaxis=dict(title="Sessions"),
-        yaxis2=dict(title="Active chargers", overlaying="y", side="right", showgrid=False),
-        legend=dict(orientation="h"), height=380, margin=dict(t=10)
-    )
-    st.plotly_chart(fig, use_container_width=True)
-
-    fig_pc = px.line(m, x="month", y="sessions_per_charger",
-                     title="Sessions per charger (real per-charger demand — flat)")
-    fig_pc.update_layout(height=300, margin=dict(t=40))
-    st.plotly_chart(fig_pc, use_container_width=True)
-
-    st.subheader("When is the network busiest?")
-    hd = load_hour_dow()
-    fig_h = px.imshow(hd.values, x=list(range(24)), y=DOW, aspect="auto",
-                      color_continuous_scale="OrRd", labels=dict(x="Hour", y="", color="Sessions"))
-    fig_h.update_layout(height=320, margin=dict(t=10))
-    st.plotly_chart(fig_h, use_container_width=True)
-
-# ============================================================
-# Tab 2 — Demand Pressure
-# ============================================================
-
-with tab2:
-    st.subheader("Demand-pressure score by local authority")
-    st.caption(
-        "Each local authority is scored by saturation rate (share of time all connectors are "
-        "simultaneously busy, weight 60%) and utilisation (occupancy rate, weight 40%), "
-        "both ranked relative to other authorities."
-    )
-
-    top = index.sort_values("pressure_score", ascending=False).reset_index(drop=True)
-    top["rank_label"] = top["pressure_rank"].astype(str) + ". " + top["local_authority"]
-
-    n_show = st.slider("Local authorities to show", min_value=5, max_value=len(top), value=len(top), step=1)
-    display_df = top.head(n_show).sort_values("pressure_score")
-    chart_h = max(400, n_show * 24)
-
-    col_bar, col_map = st.columns([1, 1])
-
-    with col_bar:
-        fig_bar = px.bar(
-            display_df,
-            x="pressure_score",
-            y="rank_label",
-            orientation="h",
-            color="pressure_score",
-            color_continuous_scale="OrRd",
-            custom_data=["local_authority", "pressure_rank", "utilisation",
-                         "saturation_rate", "n_chargepoints", "n_connectors", "revenue_per_connector"],
-        )
-        fig_bar.update_traces(
-            hovertemplate=(
-                "<b>%{customdata[0]}</b> (Rank %{customdata[1]})<br>"
-                "Pressure score: %{x:.3f}<br>"
-                "Saturation rate: %{customdata[3]:.1%}<br>"
-                "Utilisation: %{customdata[2]:.1%}<br>"
-                "Charge points: %{customdata[4]:,} (%{customdata[5]:,} connectors)<br>"
-                "Revenue / connector: £%{customdata[6]:,.0f}"
-                "<extra></extra>"
-            )
-        )
-        fig_bar.update_layout(
-            height=chart_h,
-            margin=dict(t=10, l=10),
-            coloraxis_showscale=False,
-            yaxis_title="",
-            xaxis_title="Pressure score",
-        )
-        st.plotly_chart(fig_bar, use_container_width=True)
-
-    with col_map:
-        mp = display_df.dropna(subset=["latitude", "longitude"])
-        fig_map = px.scatter_mapbox(
-            mp,
-            lat="latitude",
-            lon="longitude",
-            color="pressure_score",
-            color_continuous_scale="OrRd",
-            size="pressure_score",
-            size_max=22,
-            hover_name="local_authority",
-            custom_data=["pressure_rank", "utilisation", "saturation_rate", "n_chargepoints"],
-            mapbox_style="open-street-map",
-            zoom=5,
-            center={"lat": 56.6, "lon": -4.2},
-            height=chart_h,
-        )
-        fig_map.update_traces(
-            hovertemplate=(
-                "<b>%{hovertext}</b> (Rank %{customdata[0]})<br>"
-                "Pressure score: %{marker.color:.3f}<br>"
-                "Saturation rate: %{customdata[2]:.1%}<br>"
-                "Utilisation: %{customdata[1]:.1%}<br>"
-                "Charge points: %{customdata[3]:,}"
-                "<extra></extra>"
-            )
-        )
-        fig_map.update_layout(margin=dict(t=10), coloraxis_showscale=False)
-        st.plotly_chart(fig_map, use_container_width=True)
-
-# ============================================================
-# Tab 3 — Demand Archetypes
-# ============================================================
-
-with tab3:
-    st.subheader("Charging archetypes")
-    st.caption("Charge points clustered by behaviour (when used, how long, charger type).")
-
-    centroids = clusters.groupby("archetype").agg(
-        charge_points=("cp_id", "size"),
-        median_duration_min=("median_duration_min", "mean"),
-        rapid_share=("rapid_share", "mean"),
-        **{c: (c, "mean") for c in TIME_SHARES}
-    )
-    st.dataframe(
-        centroids[["charge_points", "median_duration_min", "rapid_share"]]
-        .round(2).reset_index(),
-        use_container_width=True, hide_index=True
-    )
-
-    # time-of-day signature per archetype
-    sig = centroids[TIME_SHARES].reset_index().melt(
-        id_vars="archetype", var_name="time", value_name="share")
-    sig["time"] = sig["time"].str.replace("pct_", "")
-    fig_sig = px.bar(sig, x="archetype", y="share", color="time", barmode="stack",
-                     title="When each archetype is used")
-    fig_sig.update_layout(height=380, xaxis_tickangle=-20, margin=dict(t=40))
-    st.plotly_chart(fig_sig, use_container_width=True)
-
-    st.subheader("Archetype mix by local authority")
-    la = st.selectbox("Local authority", sorted(geo_clusters["local_authority"].unique()))
-    la_mix = geo_clusters[geo_clusters["local_authority"] == la]["archetype"].value_counts()
-    fig_la = px.bar(la_mix.reset_index(), x="archetype", y="count", title=f"{la} — charger archetypes")
-    fig_la.update_layout(height=340, xaxis_tickangle=-20, margin=dict(t=40))
-    st.plotly_chart(fig_la, use_container_width=True)
-
-# ============================================================
-# Tab 4 — Planning Priorities
-# ============================================================
-
-with tab4:
-    st.subheader("Where — and what — to build")
-    st.caption("High-pressure local authorities, with the dominant local archetype "
-               "indicating the *type* of capacity to add.")
-
-    pri = index.merge(dominant, on="local_authority", how="left")
-    pri = pri.sort_values("pressure_score", ascending=False)
-
-    def recommend(row):
-        if row["pressure_score"] < 0.5:
-            return "Monitor"
-        a = str(row["dominant_archetype"])
-        if "Rapid" in a:
-            kind = "rapid chargers"
-        elif "commuter" in a:
-            kind = "AC workplace chargers"
-        elif "depot" in a:
-            kind = "AC long-stay / depot chargers"
-        else:
-            kind = "AC public / retail chargers"
-        return f"Expand — add {kind}"
-
-    pri["recommendation"] = pri.apply(recommend, axis=1)
-    st.dataframe(
-        pri[["pressure_rank", "local_authority", "pressure_score",
-             "dominant_archetype", "n_connectors", "recommendation"]],
-        use_container_width=True, hide_index=True
-    )
+map_and_detail()
 
 st.divider()
 st.caption("Data source: ChargePlace Scotland public session data · chargeplacescotland.org")
