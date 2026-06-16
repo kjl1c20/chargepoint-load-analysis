@@ -20,7 +20,7 @@ import streamlit as st
 from databricks import sql as dbsql
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv(override=True)
 
 st.set_page_config(page_title="Scotland EV Charging — Planning", layout="wide")
 
@@ -198,7 +198,6 @@ def build_site_view(cp: pd.DataFrame) -> pd.DataFrame:
             n_connectors=("n_connectors", "sum"),
             total_sessions=("total_sessions", "sum"),
             total_energy_kwh=("total_energy_kwh", "sum"),
-            total_revenue=("total_revenue", "sum"),
             occupied_hours=("occupied_hours", "sum"),
             available_connector_hours=("available_connector_hours", "sum"),
             saturated_hours=("saturated_hours", "sum"),
@@ -226,21 +225,19 @@ def build_site_view(cp: pd.DataFrame) -> pd.DataFrame:
 def render_detail(row, bundle=None):
     """The clicked-site card: site-level metrics + demand-over-time."""
     if row is None:
-        st.info("Click a site on the map to inspect its sessions, energy, revenue, "
-                "utilisation, saturation and demand over time.")
+        st.info("Click a site on the map to inspect its sessions.")
         return
 
     name = row["site_name"] if pd.notna(row["site_name"]) else "Unnamed site"
     st.markdown(f"### {name}")
     loc = row["postcode"] if pd.notna(row["postcode"]) else "—"
-    st.caption(f"{loc} · pressure rank #{int(row['pressure_rank'])} · "
+    st.caption(f"{loc} · "
                f"score {row['pressure_score']:.3f} · "
                f"{int(row['n_charge_points'])} charge point(s) · {int(row['n_connectors'])} connectors")
 
-    a1, a2, a3 = st.columns(3)
+    a1, a2 = st.columns(2)
     a1.metric("Total sessions", f"{int(row['total_sessions']):,}")
     a2.metric("Total energy", f"{row['total_energy_kwh'] / 1000:,.1f} MWh")
-    a3.metric("Total revenue", f"£{row['total_revenue']:,.0f}")
     b1, b2 = st.columns(2)
     b1.metric("Utilisation", f"{row['utilisation']:.1%}")
     b2.metric("Saturation rate", f"{row['saturation_rate']:.1%}")
@@ -317,8 +314,7 @@ def map_and_detail():
             "Postcode area", areas,
             format_func=lambda a: f"{a} — {AREA_NAMES.get(a, a)}",
         )
-        st.caption("Click a site on the map to inspect its sessions, energy, revenue, "
-                   "utilisation, saturation and demand over time.")
+        st.caption("Click a site on the map to inspect its sessions.")
 
         mp = (site_view[(site_view["postcode_area"] == region)
                         & site_view["latitude"].notna() & site_view["longitude"].notna()]
@@ -364,7 +360,7 @@ def map_and_detail():
         if not sel.empty:  # real teardrop pin on the selected site (deck.gl marker atlas)
             layers.append(pdk.Layer(
                 "IconLayer", data=sel.assign(icon="marker"), get_icon="icon",
-                get_position=["longitude", "latitude"], get_size=4, size_scale=15,
+                get_position=["longitude", "latitude"], get_size=4, size_scale=8,
                 get_color=PIN_COLOR, icon_atlas=PIN_ATLAS, icon_mapping=PIN_MAPPING,
                 pickable=False,
             ))
