@@ -7,12 +7,15 @@ and Silver sessions from Databricks via the SQL connector (aggregations pushed t
 
 Run:  poetry run streamlit run src/dashboard.py
 Needs in .env:  DATABRICKS_SERVER_HOSTNAME (or DATABRICKS_HOST), DATABRICKS_HTTP_PATH, DATABRICKS_TOKEN
+Map: tokenless MapLibre basemap (no Mapbox token required).
 """
 
 import os
+from concurrent.futures import ThreadPoolExecutor
 
 import pandas as pd
 import plotly.express as px
+import pydeck as pdk
 import streamlit as st
 from databricks import sql as dbsql
 from dotenv import load_dotenv
@@ -23,6 +26,32 @@ st.set_page_config(page_title="Scotland EV Charging — Planning", layout="wide"
 
 GOLD_TABLE = os.getenv("GOLD_SITE_PRESSURE_TABLE", "chargepoint_analysis.gold.site_pressure")
 SESSIONS_TABLE = os.getenv("SILVER_SESSIONS_TABLE", "chargepoint_analysis.silver.cps_sessions_clean")
+
+# Map rendering with pydeck (deck.gl). Tokenless Carto basemap; the selected site is marked
+# with a real teardrop pin via IconLayer using deck.gl's stock marker atlas (mask=True lets
+# us tint it). Sites are a ScatterplotLayer coloured by pressure (OrRd ramp), pickable so a
+# click selects a site.
+MAP_STYLE = os.getenv("MAP_STYLE", "light")  # pydeck/Carto style: light | dark | road | ...
+PIN_ATLAS = "https://raw.githubusercontent.com/visgl/deck.gl-data/master/website/icon-atlas.png"
+PIN_MAPPING = {"marker": {"x": 0, "y": 0, "width": 128, "height": 128, "anchorY": 128, "mask": True}}
+PIN_COLOR = [31, 120, 180]  # blue teardrop for the selected site
+
+# OrRd colour ramp (matches the old plotly scale) — pressure_score (0–1) → [r, g, b].
+_ORRD = [(255, 247, 236), (253, 212, 158), (253, 141, 60), (227, 74, 51), (179, 0, 0)]
+
+
+def _orrd_rgb(t: float) -> list:
+    """Interpolate the OrRd ramp at t∈[0,1] → [r, g, b]."""
+    if t is None or pd.isna(t):
+        return [180, 180, 180]
+    t = min(max(float(t), 0.0), 1.0)
+    pos = t * (len(_ORRD) - 1)
+    i = int(pos)
+    if i >= len(_ORRD) - 1:
+        return list(_ORRD[-1])
+    f = pos - i
+    a, b = _ORRD[i], _ORRD[i + 1]
+    return [round(a[c] + (b[c] - a[c]) * f) for c in range(3)]
 
 # Scottish postcode areas → place name, for the region filter
 AREA_NAMES = {
@@ -136,6 +165,22 @@ def load_site_trend(cp_ids: tuple):
     """)
 
 
+def load_site_bundle(cp_ids: tuple) -> dict:
+    """Fetch all four per-site datasets concurrently — each is an independent Databricks
+    round-trip (its own connection), so firing them in parallel cuts first-click latency
+    from the sum of 4 round-trips to roughly the slowest one. Each loader still has its own
+    @st.cache_data, so a repeat selection skips the network entirely regardless."""
+    loaders = {
+        "trend": load_site_trend,
+        "profile": load_site_profile,
+        "hour_duration": load_site_hour_duration,
+        "daycounts": load_site_daycounts,
+    }
+    with ThreadPoolExecutor(max_workers=len(loaders)) as ex:
+        futures = {name: ex.submit(fn, cp_ids) for name, fn in loaders.items()}
+        return {name: f.result() for name, f in futures.items()}
+
+
 @st.cache_data
 def build_site_view(cp: pd.DataFrame) -> pd.DataFrame:
     """Aggregate the per-cp_id gold table to one row per physical site (location).
@@ -178,10 +223,10 @@ def build_site_view(cp: pd.DataFrame) -> pd.DataFrame:
 # Page
 # ============================================================
 
-def render_detail(row):
+def render_detail(row, bundle=None):
     """The clicked-site card: site-level metrics + demand-over-time."""
     if row is None:
-        st.info("👈 Click a site on the map to inspect its sessions, energy, revenue, "
+        st.info("Click a site on the map to inspect its sessions, energy, revenue, "
                 "utilisation, saturation and demand over time.")
         return
 
@@ -200,7 +245,7 @@ def render_detail(row):
     b1.metric("Utilisation", f"{row['utilisation']:.1%}")
     b2.metric("Saturation rate", f"{row['saturation_rate']:.1%}")
 
-    trend = load_site_trend(row["cp_ids"])
+    trend = bundle["trend"]
     fig_trend = px.area(trend, x="month", y="sessions", title="Demand over time")
     fig_trend.update_traces(line_color="#d73027", fillcolor="rgba(215,48,39,0.15)")
     fig_trend.update_layout(height=290, margin=dict(t=40, b=0, l=0, r=0),
@@ -208,15 +253,14 @@ def render_detail(row):
     st.plotly_chart(fig_trend, use_container_width=True)
 
 
-def render_site_profiles(row):
+def render_site_profiles(row, bundle):
     """Per-site charging profile: hour×day heatmap, hour×duration heatmap, weekday vs weekend."""
     if row is None:
         return
-    cp_ids = row["cp_ids"]
     name = row["site_name"] if pd.notna(row["site_name"]) else "this site"
     st.markdown(f"#### When does **{name}** get used?")
 
-    prof = load_site_profile(cp_ids)
+    prof = bundle["profile"]
     p1, p2 = st.columns(2, gap="large")
 
     with p1:
@@ -232,7 +276,7 @@ def render_site_profiles(row):
 
     with p2:
         st.caption("When do long vs short sessions happen?")
-        hd = load_site_hour_duration(cp_ids)
+        hd = bundle["hour_duration"]
         mat2 = (hd.pivot(index="dur_band", columns="hour", values="sessions")
                 .reindex(DUR_BANDS).reindex(columns=range(24)).fillna(0))
         fig_hd = px.imshow(
@@ -247,7 +291,7 @@ def render_site_profiles(row):
     agg = prof.copy()
     agg["day_type"] = agg["dow"].apply(lambda d: "Weekend" if d >= 5 else "Weekday")
     agg = agg.groupby(["day_type", "hour"], as_index=False)["sessions"].sum()
-    days = load_site_daycounts(cp_ids).set_index("day_type")["days"].to_dict()
+    days = bundle["daycounts"].set_index("day_type")["days"].to_dict()
     agg["avg_sessions"] = agg.apply(lambda r: r["sessions"] / days.get(r["day_type"], 1), axis=1)
     fig_w = px.line(
         agg, x="hour", y="avg_sessions", color="day_type", markers=True,
@@ -263,83 +307,101 @@ def render_site_profiles(row):
 
 @st.fragment
 def map_and_detail():
-    """Interactive map + detail, isolated in a fragment so a click reruns only this block."""
+    """Map + detail. Pick a site by name or by clicking the map; one site is preselected.
+    Defaults to the first postcode area (showing all of Scotland at once isn't useful)."""
     map_col, detail_col = st.columns([3, 2], gap="large")
 
     with map_col:
         areas = sorted(site_view["postcode_area"].dropna().unique())
         region = st.selectbox(
-            "Postcode area",
-            [ALL_REGIONS] + areas,
-            format_func=lambda a: a if a == ALL_REGIONS else f"{a} — {AREA_NAMES.get(a, a)}",
+            "Postcode area", areas,
+            format_func=lambda a: f"{a} — {AREA_NAMES.get(a, a)}",
         )
+        st.caption("Click a site on the map to inspect its sessions, energy, revenue, "
+                   "utilisation, saturation and demand over time.")
 
-        mp = site_view.dropna(subset=["latitude", "longitude"])
-        if region == ALL_REGIONS:
-            center, zoom = {"lat": 56.8, "lon": -4.2}, 5.3
-        else:
-            mp = mp[mp["postcode_area"] == region]
-            center = {"lat": mp["latitude"].mean(), "lon": mp["longitude"].mean()}
-            zoom = 8.5
+        mp = (site_view[(site_view["postcode_area"] == region)
+                        & site_view["latitude"].notna() & site_view["longitude"].notna()]
+              .sort_values("pressure_rank"))
+        option_keys = mp["site_key"].tolist()
+        name_by_key = dict(zip(mp["site_key"], mp["site_name"]))
 
-        fig_map = px.scatter_mapbox(
-            mp,
-            lat="latitude",
-            lon="longitude",
-            color="pressure_score",
-            color_continuous_scale="OrRd",
-            size="pressure_score",
-            size_max=18,
-            hover_name="site_name",
-            custom_data=["site_key", "pressure_rank", "postcode", "saturation_rate",
-                         "utilisation", "n_connectors", "n_charge_points"],
-            mapbox_style="carto-positron",
-            zoom=zoom,
-            center=center,
-            height=640,
+        if mp.empty:
+            st.info(f"No sites with coordinates in {region}.")
+            return
+
+        # A map click (stored in session_state by on_select) preselects that site in the box.
+        # pydeck returns clicked rows under selection.objects[<layer id>]; gated by _applied_click
+        # so a stale click can't fight a manual dropdown change.
+        sitebox_key = f"sitebox::{region}"
+        sel_state = st.session_state.get("pressure_map") or {}
+        hits = ((sel_state.get("selection") or {}).get("objects") or {}).get("sites") or []
+        clicked = hits[0].get("site_key") if hits else None
+        if clicked in option_keys and clicked != st.session_state.get("_applied_click"):
+            st.session_state[sitebox_key] = clicked
+            st.session_state["_applied_click"] = clicked
+
+        selected_key = st.selectbox(
+            "Site", option_keys, format_func=lambda k: name_by_key.get(k, k), key=sitebox_key,
         )
-        fig_map.update_traces(
-            hovertemplate=(
-                "<b>%{hovertext}</b> (Rank %{customdata[1]})<br>"
-                "%{customdata[2]}<br>"
-                "Pressure score: %{marker.color:.3f}<br>"
-                "Saturation rate: %{customdata[3]:.1%}<br>"
-                "Utilisation: %{customdata[4]:.1%}<br>"
-                "%{customdata[6]} charge point(s) · %{customdata[5]} connectors"
-                "<extra></extra>"
-            )
+        sel = mp[mp["site_key"] == selected_key]
+
+        # Render frame: per-point OrRd colour + pre-formatted tooltip fields (deck.gl tooltips
+        # can't format numbers, so we format them here).
+        mp_r = mp.copy()
+        mp_r["fill_color"] = mp_r["pressure_score"].apply(lambda v: _orrd_rgb(v) + [200])
+        mp_r["score_disp"] = mp_r["pressure_score"].map(lambda v: f"{v:.3f}" if pd.notna(v) else "—")
+        mp_r["sat_disp"] = mp_r["saturation_rate"].map(lambda v: f"{v * 100:.1f}%" if pd.notna(v) else "—")
+        mp_r["util_disp"] = mp_r["utilisation"].map(lambda v: f"{v * 100:.1f}%" if pd.notna(v) else "—")
+
+        sites_layer = pdk.Layer(
+            "ScatterplotLayer", data=mp_r, id="sites", pickable=True, auto_highlight=True,
+            get_position=["longitude", "latitude"], get_fill_color="fill_color",
+            get_radius=120, radius_min_pixels=6, radius_max_pixels=16,
+            stroked=True, get_line_color=[255, 255, 255], line_width_min_pixels=0.5,
         )
-        # Preserve the user's zoom/pan across reruns (e.g. after a point click) — but let
-        # it re-centre when the region filter changes, by keying uirevision to `region`.
-        fig_map.update_layout(margin=dict(t=0, b=0, l=0, r=0),
-                              coloraxis_colorbar=dict(title="Pressure"),
-                              uirevision=region)
+        layers = [sites_layer]
+        if not sel.empty:  # real teardrop pin on the selected site (deck.gl marker atlas)
+            layers.append(pdk.Layer(
+                "IconLayer", data=sel.assign(icon="marker"), get_icon="icon",
+                get_position=["longitude", "latitude"], get_size=4, size_scale=15,
+                get_color=PIN_COLOR, icon_atlas=PIN_ATLAS, icon_mapping=PIN_MAPPING,
+                pickable=False,
+            ))
 
-        event = st.plotly_chart(
-            fig_map, use_container_width=True, on_select="rerun", key="pressure_map",
-            selection_mode="points",
+        deck = pdk.Deck(
+            layers=layers, map_provider="carto", map_style=MAP_STYLE,
+            initial_view_state=pdk.ViewState(
+                latitude=float(mp["latitude"].mean()),
+                longitude=float(mp["longitude"].mean()), zoom=8.5),
+            tooltip={
+                "html": (
+                    "<b>{site_name}</b> (Rank {pressure_rank})<br/>"
+                    "{postcode}<br/>"
+                    "Pressure score: {score_disp}<br/>"
+                    "Saturation rate: {sat_disp}<br/>"
+                    "Utilisation: {util_disp}<br/>"
+                    "{n_charge_points} charge point(s) · {n_connectors} connectors"
+                ),
+                "style": {"backgroundColor": "#262730", "color": "white", "fontSize": "0.8rem"},
+            },
         )
+        st.pydeck_chart(deck, use_container_width=True, height=640,  # native trackpad/scroll zoom
+                        on_select="rerun", selection_mode="single-object", key="pressure_map")
+        st.caption(f"{len(mp):,} sites in {region} — {AREA_NAMES.get(region, region)}.")
 
-        scope = ALL_REGIONS if region == ALL_REGIONS else f"{region} — {AREA_NAMES.get(region, region)}"
-        st.caption(f"{len(mp):,} sites shown ({scope}). Some sites have no postcode area.")
-
-    # resolve the clicked site (site_key carried in customdata[0])
-    site_row = None
-    points = (event or {}).get("selection", {}).get("points", [])
-    if points:
-        cd = points[0].get("customdata")
-        if cd:
-            match = site_view[site_view["site_key"] == cd[0]]
-            if not match.empty:
-                site_row = match.iloc[0]
+    site_row = sel.iloc[0] if not sel.empty else None
+    # One concurrent fetch shared by both render functions below — avoids firing the same
+    # 4 queries twice and means render_detail/render_site_profiles never block each other.
+    bundle = load_site_bundle(site_row["cp_ids"]) if site_row is not None else None
 
     with detail_col:
         with st.container(border=True):
-            render_detail(site_row)
+            render_detail(site_row, bundle)
 
     if site_row is not None:
         st.markdown("")
-        render_site_profiles(site_row)
+        render_site_profiles(site_row, bundle)
 
 
 sites = load_sites()
@@ -355,7 +417,7 @@ st.caption(
 st.subheader("Where is the network under pressure?")
 st.caption(
     "Each point is a **site** (the charge points at one location), coloured by demand-pressure "
-    "score (saturation 60% + utilisation 40%). **Click a site** to inspect it."
+    "score (saturation 60% + utilisation 40%)."
 )
 
 map_and_detail()
