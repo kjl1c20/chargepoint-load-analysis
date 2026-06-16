@@ -32,6 +32,8 @@ import re
 import json
 import logging
 import argparse
+from concurrent.futures import ThreadPoolExecutor
+from functools import lru_cache
 
 import requests
 from databricks import sql as dbsql
@@ -58,6 +60,7 @@ AREA_RE = re.compile(r"^([A-Z]{1,2})")
 
 AI_MODEL = os.getenv("DQ_AI_MODEL", "claude-sonnet-4-6")
 AI_MAX_TOKENS = int(os.getenv("DQ_AI_MAX_TOKENS", "4096"))
+AI_MAX_WORKERS = int(os.getenv("DQ_AI_MAX_WORKERS", "6"))  # concurrent grounded calls
 
 
 # ============================================================
@@ -121,6 +124,20 @@ def _reverse_geocode(points: list[tuple[float, float]]) -> list[str | None]:
             logger.warning("postcodes.io chunk failed (%s) — coords unresolved for %d points", e, len(chunk))
             out.extend([None] * len(chunk))
     return out
+
+
+@lru_cache(maxsize=None)
+def _forward_geocode(postcode: str) -> tuple[float, float] | None:
+    """Postcode → (lat, lon) centroid via postcodes.io. None if not found. Cached per postcode."""
+    try:
+        resp = requests.get(f"https://api.postcodes.io/postcodes/{requests.utils.quote(postcode)}", timeout=15)
+        if resp.status_code != 200:
+            return None
+        r = resp.json().get("result") or {}
+        return (r["latitude"], r["longitude"]) if r.get("latitude") is not None else None
+    except requests.RequestException as e:
+        logger.warning("forward-geocode failed for %r (%s)", postcode, e)
+        return None
 
 
 def _verdict(feed_area, coord_area, allowlist) -> str | None:
@@ -232,14 +249,23 @@ def flag_anomalies():
 # ============================================================
 
 SYSTEM = (
-    "You verify UK postcodes for ChargePlace Scotland EV charge sites. Every site is in "
-    "Scotland (postcode areas: AB DD DG EH FK G HS IV KA KW KY ML PA PH TD ZE). You are given "
-    "a site name, the postcode currently on record, a postcode reverse-geocoded from the "
-    "site's coordinates, and the coordinates. BOTH the postcode and the coordinates may be "
-    "wrong. Use web search/fetch to find where the named site actually is, then decide the "
-    "correct postcode and address. Reply with ONLY a JSON object and nothing else:\n"
-    '{"issue": "<what is wrong, one phrase>", "suggested_postcode": "<correct postcode>", '
-    '"suggested_address": "<full address>", "description": "<one concise sentence>"}'
+    "You verify locations for ChargePlace Scotland EV charge sites. Every site is in Scotland "
+    "(postcode areas: AB DD DG EH FK G HS IV KA KW KY ML PA PH TD ZE).\n\n"
+    "You are given the anomaly type (verdict), the site name, the postcode on record, a postcode "
+    "reverse-geocoded from the on-record coordinates, and the coordinates. Either the postcode OR "
+    "the coordinates (or both) may be wrong. Use web search/fetch to find where the named site "
+    "actually is, then decide which signal is wrong.\n\n"
+    "Guidance by verdict:\n"
+    "- 'postcode_not_scottish' or 'postcode_missing': the on-record postcode is the problem — set "
+    "postcode_wrong=true. The coordinates are usually fine; set coords_wrong=true only if they "
+    "clearly don't match the real site.\n"
+    "- 'area_mismatch': the postcode and coordinates disagree. Work out which is correct for the "
+    "named site and set the flags accordingly. Mark BOTH wrong only if both genuinely are.\n\n"
+    "Always give correct_postcode (the site's true postcode) — it's the anchor. Do NOT output "
+    "coordinates; they are derived from the postcode downstream.\n\n"
+    "Reply with ONLY this JSON object and nothing else:\n"
+    '{"issue": "<one phrase>", "correct_postcode": "<true postcode>", '
+    '"postcode_wrong": true, "coords_wrong": false, "description": "<one sentence>"}'
 )
 TOOLS = [{"type": "web_search_20260209", "name": "web_search"},
          {"type": "web_fetch_20260209", "name": "web_fetch"}]
@@ -274,7 +300,7 @@ def suggest_fixes():
         LEFT JOIN (SELECT cp_id, first(latitude, true) AS latitude, first(longitude, true) AS longitude
                    FROM {SILVER_TABLE} GROUP BY cp_id) cp ON f.entity_id = cp.cp_id
         WHERE f.check_name = :cn AND f.status = 'open'
-          AND get_json_object(f.details, '$.suggested_postcode') IS NULL
+          AND get_json_object(f.details, '$.ai_reviewed') IS NULL
     """, {"cn": CHECK_NAME})
 
     if pending.empty:
@@ -282,38 +308,69 @@ def suggest_fixes():
         return
 
     client = anthropic.Anthropic()  # reads ANTHROPIC_API_KEY
-    ops: list[tuple[str, dict]] = []
+
+    # Build one prompt per finding; charge points at the same site produce an identical prompt
+    # (same site_name / postcode / coords), so they collapse to a single AI call.
+    findings = []  # (cp_id, details_dict, prompt)
     for r in pending.itertuples():
         d = json.loads(r.details)
-        user = (f"Site name: {d.get('site_name')}\nPostcode on record: {d.get('feed_postcode')}\n"
-                f"Postcode from coordinates: {d.get('coord_postcode')}\n"
-                f"Coordinates: {r.latitude}, {r.longitude}")
-        try:
-            resp = _ask(client, user)
-        except anthropic.APIError as e:  # rate limit / network / server — skip this one
-            logger.warning("cp_id %s: Anthropic call failed (%s) — skipping", r.cp_id, e)
-            continue
+        prompt = (f"Verdict: {d.get('verdict')}\n"
+                  f"Site name: {d.get('site_name')}\n"
+                  f"Postcode on record: {d.get('feed_postcode')}\n"
+                  f"Postcode from coordinates: {d.get('coord_postcode')}\n"
+                  f"Coordinates: {r.latitude}, {r.longitude}")
+        findings.append((str(r.cp_id), d, prompt))
 
+    unique_prompts = sorted({p for _, _, p in findings})
+    logger.info("%d finding(s) → %d unique site question(s)", len(findings), len(unique_prompts))
+
+    def _resolve(prompt):
+        try:
+            resp = _ask(client, prompt)
+        except anthropic.APIError as e:  # rate limit / network / server
+            logger.warning("Anthropic call failed (%s) — skipping affected finding(s)", e)
+            return None
         data = _extract_json(resp)
         if not data:
-            logger.warning("cp_id %s: could not parse JSON (stop_reason=%s)", r.cp_id, resp.stop_reason)
-            continue
+            logger.warning("Could not parse JSON (stop_reason=%s) — skipping", resp.stop_reason)
+            return None
+        return data, resp.id
 
+    # one call per unique site question, run concurrently
+    with ThreadPoolExecutor(max_workers=AI_MAX_WORKERS) as pool:
+        answers = dict(zip(unique_prompts, pool.map(_resolve, unique_prompts)))
+
+    ops: list[tuple[str, dict]] = []
+    for cp_id, d, prompt in findings:  # fan the per-site answer back to each charge point
+        ans = answers.get(prompt)
+        if not ans:
+            continue
+        data, request_id = ans
+        correct_pc = data.get("correct_postcode")
         d.update({
             "issue": data.get("issue"),
-            "suggested_postcode": data.get("suggested_postcode"),
-            "suggested_address": data.get("suggested_address"),
             "description": data.get("description"),
+            "correct_postcode": correct_pc,
+            "postcode_wrong": bool(data.get("postcode_wrong")),
+            "coords_wrong": bool(data.get("coords_wrong")),
             "ai_model": AI_MODEL,
-            "request_id": resp.id,
+            "request_id": request_id,
+            "ai_reviewed": True,
         })
+        # only suggest the signal(s) the model flagged as wrong
+        if data.get("postcode_wrong") and correct_pc:
+            d["suggested_postcode"] = correct_pc
+        if data.get("coords_wrong") and correct_pc:
+            latlon = _forward_geocode(correct_pc)  # cached; derived from the postcode, not the LLM
+            if latlon:
+                d["suggested_latitude"], d["suggested_longitude"] = latlon
         ops.append((
             f"UPDATE {DQ_FINDINGS_TABLE} SET details=:details WHERE check_name=:cn AND entity_id=:eid",
-            {"details": json.dumps(d), "cn": CHECK_NAME, "eid": str(r.cp_id)},
+            {"details": json.dumps(d), "cn": CHECK_NAME, "eid": cp_id},
         ))
 
     _execute(ops)
-    logger.info("Merged %d/%d AI suggestion(s) into dq_findings.details", len(ops), len(pending))
+    logger.info("Merged %d suggestion(s) from %d unique AI call(s)", len(ops), len(unique_prompts))
 
 
 def main():

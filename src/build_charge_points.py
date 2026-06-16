@@ -26,6 +26,7 @@ try:
         StructField("postcode_source",     StringType(),    True),
         StructField("latitude",            DoubleType(),    True),
         StructField("longitude",           DoubleType(),    True),
+        StructField("coord_source",        StringType(),    True),
         StructField("connector_type",      StringType(),    True),
         StructField("max_charge_rate_kw",  DoubleType(),    True),
         StructField("network_status",      StringType(),    True),
@@ -43,14 +44,18 @@ logger = logging.getLogger(__name__)
 
 BRONZE_PATH = os.getenv("LOCATIONS_VOLUME_PATH", "/Volumes/chargepoint_analysis/bronze/locations")
 SILVER_TABLE = os.getenv("SILVER_CP_TABLE", "chargepoint_analysis.silver.charge_points")
-# Curated, human-approved postcode corrections: cp_id → correct postcode. Applied fix-on-read
-# (Bronze stays immutable). Hand-maintained — the git commit is the audit trail (who/when/why).
+
+# Postcode corrections: cp_id → correct postcode. 
 POSTCODE_OVERRIDES = {
     "61203": "ML11 8RP",  # NHS State Hospital Visitors Car Park
     "61204": "ML11 8RP",  # NHS State Hospital Visitors Car Park
     "61205": "ML11 8RP",  # NHS State Hospital Visitors Car Park
     "61206": "ML11 8RP",  # NHS State Hospital Visitors Car Park
     "61691": "FK10 4LD"   # Devonway
+}
+# Curated coordinate corrections: cp_id → (latitude, longitude).
+COORD_OVERRIDES = {
+    # "12345": (55.066793, -3.169327),
 }
 
 POWER_TYPE_MAP = {"AC_1_PHASE": "AC", "AC_2_PHASE": "AC", "AC_3_PHASE": "AC", "DC": "DC"}
@@ -130,21 +135,35 @@ def _flatten(locations: list) -> pd.DataFrame:
 
 
 def _apply_overrides(sdf):
-    """Fix-on-read: replace the feed postcode with a curated override where one exists.
+    """Fix-on-read: replace the feed postcode and/or coordinates with curated overrides.
 
-    Deterministic, in-code mapping — Bronze is never mutated. Empty mapping = no-op
-    (postcode_source already 'feed').
+    Deterministic, in-code mappings — Bronze is never mutated. Empty mappings = no-op
+    (postcode_source / coord_source stay 'feed').
     """
-    if not POSTCODE_OVERRIDES:
+    if not POSTCODE_OVERRIDES and not COORD_OVERRIDES:
         return sdf
 
-    corrected = F.create_map([F.lit(x) for kv in POSTCODE_OVERRIDES.items() for x in kv])[F.col("cp_id")]
-    out = (
-        sdf.withColumn("postcode", F.coalesce(corrected, F.col("postcode")))
-        .withColumn("postcode_source",
-                    F.when(corrected.isNotNull(), F.lit("override")).otherwise(F.lit("feed")))
-    )
-    logger.info("Applied %d curated postcode override(s)", len(POSTCODE_OVERRIDES))
+    out = sdf
+    if POSTCODE_OVERRIDES:
+        pc = F.create_map([F.lit(x) for kv in POSTCODE_OVERRIDES.items() for x in kv])[F.col("cp_id")]
+        out = (
+            out.withColumn("postcode", F.coalesce(pc, F.col("postcode")))
+            .withColumn("postcode_source",
+                        F.when(pc.isNotNull(), F.lit("override")).otherwise(F.lit("feed")))
+        )
+        logger.info("Applied %d curated postcode override(s)", len(POSTCODE_OVERRIDES))
+
+    if COORD_OVERRIDES:
+        lat = F.create_map([F.lit(x) for cp, (la, lo) in COORD_OVERRIDES.items() for x in (cp, la)])[F.col("cp_id")]
+        lon = F.create_map([F.lit(x) for cp, (la, lo) in COORD_OVERRIDES.items() for x in (cp, lo)])[F.col("cp_id")]
+        out = (
+            out.withColumn("latitude", F.coalesce(lat, F.col("latitude")))
+            .withColumn("longitude", F.coalesce(lon, F.col("longitude")))
+            .withColumn("coord_source",
+                        F.when(lat.isNotNull(), F.lit("override")).otherwise(F.lit("feed")))
+        )
+        logger.info("Applied %d curated coordinate override(s)", len(COORD_OVERRIDES))
+
     return out
 
 
@@ -171,6 +190,7 @@ def main():
     df["source_snapshot"] = path.rsplit("/", 1)[-1]
     df["ingested_at"] = pd.Timestamp.utcnow()
     df["postcode_source"] = "feed"  # may flip to 'override' below
+    df["coord_source"] = "feed"     # may flip to 'override' below
 
     required = [f.name for f in SILVER_SCHEMA.fields if not f.nullable and f.name in df.columns]
     before = len(df)
