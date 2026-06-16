@@ -1,45 +1,46 @@
 """Postcode data-quality: flag anomalies by triangulation, then suggest fixes with Sonnet.
 
-Writes to the generic data-quality register `reference.dq_findings` — fixed columns stay
-thin (check_name, entity_id, message, status, timestamps), and everything postcode-specific
-(verdict, coord_postcode, suggested fix) lives in the `details` JSON. New checks reuse the
-same table by writing a different `check_name` + `details`.
+Runs **locally** (not on Databricks Serverless, whose network egress blocks postcodes.io and
+api.anthropic.com). Talks to Databricks over databricks-sql-connector — same pattern as
+harvest_locations.py and dashboard.py — and makes the external calls from your machine.
 
-One Databricks job, two ordered phases:
+Writes to the generic register `reference.dq_findings`: thin fixed columns plus a `details`
+JSON for check-specific fields, so new checks reuse the table by writing a different
+`check_name` + `details`.
 
   flag_anomalies()  — deterministic. Reverse-geocode each charge point's coordinates
-                      (postcodes.io), compare the feed postcode area (A1) against the
-                      coordinate-derived area (A2) and the Scottish allowlist, and upsert
-                      findings into reference.dq_findings (status='open'). Committed first.
-                      Findings no longer flagged are auto-resolved.
+                      (postcodes.io), compare feed area (A1) vs coord area (A2) vs the
+                      Scottish allowlist, and upsert findings (status='open'). Findings no
+                      longer flagged are auto-resolved; dismissed ones never re-open.
 
-  suggest_fixes()   — async AI (skippable via --skip-ai / DQ_SKIP_AI). For each open finding
-                      without a suggestion yet, a grounded Claude Sonnet batch proposes a fix
-                      and merges {issue, suggested_postcode, suggested_address, description}
-                      into the finding's `details`.
+  suggest_fixes()   — AI (skippable via --skip-ai / DQ_SKIP_AI). For each open finding with
+                      no suggestion yet, a grounded Claude Sonnet call proposes a fix and
+                      merges {issue, suggested_postcode, suggested_address, description} into
+                      the finding's `details`.
 
-Neither phase touches Bronze or Silver. A human reviews findings, applies an approved
-correction to reference.postcode_overrides, and build_charge_points.py picks it up.
+A human applies an approved correction to the POSTCODE_OVERRIDES mapping in
+build_charge_points.py; it picks it up on the next Silver rebuild. Bronze/Silver are never
+touched here.
 
-Run:  poetry run python src/dq_postcodes.py [--skip-ai]   (on Databricks)
-Needs: ANTHROPIC_API_KEY (AI phase only); internet egress to postcodes.io + Anthropic.
+Run:  poetry run python src/dq_postcodes.py [--skip-ai]
+Needs in .env:  DATABRICKS_SERVER_HOSTNAME (or DATABRICKS_HOST), DATABRICKS_HTTP_PATH,
+                DATABRICKS_TOKEN, and (AI phase only) ANTHROPIC_API_KEY.
 """
 
 import os
 import re
 import json
-import time
 import logging
 import argparse
 
 import requests
+from databricks import sql as dbsql
+from dotenv import load_dotenv
 
-from pyspark.sql import SparkSession, functions as F
+load_dotenv()
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 logger = logging.getLogger(__name__)
-
-spark = SparkSession.getActiveSession() or SparkSession.builder.getOrCreate()
 
 SILVER_TABLE = os.getenv("SILVER_CP_TABLE", "chargepoint_analysis.silver.charge_points")
 AREAS_TABLE = os.getenv("POSTCODE_AREAS_TABLE", "chargepoint_analysis.reference.postcode_areas")
@@ -56,18 +57,45 @@ POSTCODES_IO_BULK = "https://api.postcodes.io/postcodes"
 AREA_RE = re.compile(r"^([A-Z]{1,2})")
 
 AI_MODEL = os.getenv("DQ_AI_MODEL", "claude-sonnet-4-6")
-BATCH_POLL_SECONDS = int(os.getenv("DQ_BATCH_POLL_SECONDS", "30"))
-BATCH_MAX_WAIT_SECONDS = int(os.getenv("DQ_BATCH_MAX_WAIT_SECONDS", "3600"))
-
-FINDING_SCHEMA = "check_name string, entity_id string, message string, details string"
+AI_MAX_TOKENS = int(os.getenv("DQ_AI_MAX_TOKENS", "4096"))
 
 
 # ============================================================
-# helpers
+# Databricks SQL connection (parameterized — no string interpolation of values)
+# ============================================================
+
+def _connect():
+    host = (os.getenv("DATABRICKS_SERVER_HOSTNAME") or os.getenv("DATABRICKS_HOST") or "")
+    host = host.replace("https://", "").replace("http://", "").rstrip("/")
+    http_path, token = os.getenv("DATABRICKS_HTTP_PATH"), os.getenv("DATABRICKS_TOKEN")
+    if not (host and http_path and token):
+        raise RuntimeError(
+            "Missing Databricks connection settings. Set DATABRICKS_SERVER_HOSTNAME "
+            "(or DATABRICKS_HOST), DATABRICKS_HTTP_PATH and DATABRICKS_TOKEN in .env."
+        )
+    return dbsql.connect(server_hostname=host, http_path=http_path, access_token=token)
+
+
+def _query(sql: str, params: dict | None = None):
+    with _connect() as conn, conn.cursor() as cur:
+        cur.execute(sql, params) if params else cur.execute(sql)
+        return cur.fetchall_arrow().to_pandas()
+
+
+def _execute(operations: list[tuple[str, dict]]):
+    """Run (sql, params) write statements in one session. Delta DML is atomic per statement."""
+    if not operations:
+        return
+    with _connect() as conn, conn.cursor() as cur:
+        for sql, params in operations:
+            cur.execute(sql, params) if params else cur.execute(sql)
+
+
+# ============================================================
+# helpers (pure)
 # ============================================================
 
 def _area(postcode) -> str | None:
-    """Postcode area = leading 1–2 letters (G, EH, ML ...). None if unparseable."""
     if not postcode:
         return None
     m = AREA_RE.match(str(postcode).strip().upper())
@@ -96,14 +124,13 @@ def _reverse_geocode(points: list[tuple[float, float]]) -> list[str | None]:
 
 
 def _verdict(feed_area, coord_area, allowlist) -> str | None:
-    """Triangulation verdict. None = no anomaly (don't flag)."""
     if not feed_area:
         return "postcode_missing"
     if feed_area not in allowlist:
         return "postcode_not_scottish"
     if coord_area and coord_area in allowlist and coord_area != feed_area:
         return "area_mismatch"
-    return None  # feed area is a valid Scottish area and agrees with coords (or coords unknown)
+    return None
 
 
 def _extract_json(message) -> dict | None:
@@ -122,18 +149,25 @@ def _extract_json(message) -> dict | None:
 # ============================================================
 
 def flag_anomalies():
-    cps = (
-        spark.table(SILVER_TABLE)
-        .groupBy("cp_id")
-        .agg(F.first("site_name", ignorenulls=True).alias("site_name"),
-             F.first("postcode", ignorenulls=True).alias("postcode"),
-             F.first("latitude", ignorenulls=True).alias("latitude"),
-             F.first("longitude", ignorenulls=True).alias("longitude"))
-        .toPandas()
-    )
-    logger.info("Checking %d charge points", len(cps))
+    allowlist = set(_query(f"SELECT area_code FROM {AREAS_TABLE}")["area_code"])
+    if not allowlist:
+        raise RuntimeError(
+            f"{AREAS_TABLE} is empty — run setup.sql to seed the Scottish postcode areas "
+            "before validating (an empty allowlist would flag every site)."
+        )
 
-    allowlist = {r["area_code"] for r in spark.table(AREAS_TABLE).select("area_code").toPandas().to_dict("records")}
+    cps = _query(f"""
+        SELECT cp_id,
+               first(site_name, true) AS site_name,
+               first(postcode, true)  AS postcode,
+               first(latitude, true)  AS latitude,
+               first(longitude, true) AS longitude
+        FROM {SILVER_TABLE} GROUP BY cp_id
+    """)
+    if cps.empty:
+        logger.warning("%s has no charge points — nothing to validate", SILVER_TABLE)
+        return
+    logger.info("Checking %d charge points", len(cps))
 
     has_coords = cps["latitude"].notna() & cps["longitude"].notna()
     pts = [(float(la), float(lo)) for la, lo in zip(cps.loc[has_coords, "latitude"], cps.loc[has_coords, "longitude"])]
@@ -148,39 +182,53 @@ def flag_anomalies():
     logger.info("Flagged %d / %d charge points: %s",
                 len(flagged), len(cps), flagged["verdict"].value_counts().to_dict())
 
-    # Map each flagged row to a generic finding (postcode specifics → details JSON).
-    findings = [{
-        "check_name": CHECK_NAME,
-        "entity_id": r["cp_id"],
-        "message": f"Feed postcode {r['postcode']!r} (area {r['feed_area']!r}) — "
-                   f"{VERDICT_MSG.get(r['verdict'], r['verdict'])}.",
-        "details": json.dumps({
+    existing = _query(
+        f"SELECT entity_id, status FROM {DQ_FINDINGS_TABLE} WHERE check_name = :cn",
+        {"cn": CHECK_NAME},
+    )
+    status_by_id = dict(zip(existing["entity_id"], existing["status"])) if not existing.empty else {}
+    flagged_ids = set(flagged["cp_id"])
+
+    ops: list[tuple[str, dict]] = []
+    for r in flagged.to_dict("records"):
+        eid = r["cp_id"]
+        message = (f"Feed postcode {r['postcode']!r} (area {r['feed_area']!r}) — "
+                   f"{VERDICT_MSG.get(r['verdict'], r['verdict'])}.")
+        details = json.dumps({
             "verdict": r["verdict"], "site_name": r["site_name"],
             "feed_postcode": r["postcode"], "feed_area": r["feed_area"],
             "coord_postcode": r["coord_postcode"], "coord_area": r["coord_area"],
-        }),
-    } for r in flagged.to_dict("records")]
+        })
+        prior = status_by_id.get(eid)
+        if prior is None:  # new anomaly
+            ops.append((
+                f"INSERT INTO {DQ_FINDINGS_TABLE} "
+                "(check_name, entity_id, message, details, status, detected_at) "
+                "VALUES (:cn, :eid, :msg, :details, 'open', current_timestamp())",
+                {"cn": CHECK_NAME, "eid": eid, "msg": message, "details": details},
+            ))
+        elif prior == "resolved":  # regression — reopen, refresh
+            ops.append((
+                f"UPDATE {DQ_FINDINGS_TABLE} SET status='open', resolved_at=NULL, "
+                "message=:msg, details=:details WHERE check_name=:cn AND entity_id=:eid",
+                {"cn": CHECK_NAME, "eid": eid, "msg": message, "details": details},
+            ))
+        # prior in ('open','dismissed') → leave untouched (preserves AI suggestion / dismissal)
 
-    # Empty list still creates a typed (empty) view so disappeared findings get auto-resolved.
-    spark.createDataFrame(findings, schema=FINDING_SCHEMA).createOrReplaceTempView("dq_flagged")
-    spark.sql(f"""
-        MERGE INTO {DQ_FINDINGS_TABLE} t
-        USING dq_flagged s ON t.check_name = s.check_name AND t.entity_id = s.entity_id
-        WHEN MATCHED AND t.status = 'resolved' THEN UPDATE SET
-            t.status = 'open', t.resolved_at = NULL, t.message = s.message, t.details = s.details
-        WHEN NOT MATCHED THEN INSERT
-            (check_name, entity_id, message, details, status, detected_at)
-            VALUES (s.check_name, s.entity_id, s.message, s.details, 'open', current_timestamp())
-        WHEN NOT MATCHED BY SOURCE AND t.check_name = '{CHECK_NAME}' AND t.status = 'open'
-            THEN UPDATE SET t.status = 'resolved', t.resolved_at = current_timestamp()
-    """)
-    # Open findings that are still flagged are intentionally left untouched — that preserves
-    # any AI suggestion already merged into their details.
-    logger.info("dq_findings upserted (deterministic flags committed)")
+    for eid, st in status_by_id.items():  # auto-resolve no-longer-flagged
+        if st == "open" and eid not in flagged_ids:
+            ops.append((
+                f"UPDATE {DQ_FINDINGS_TABLE} SET status='resolved', resolved_at=current_timestamp() "
+                "WHERE check_name=:cn AND entity_id=:eid",
+                {"cn": CHECK_NAME, "eid": eid},
+            ))
+
+    _execute(ops)
+    logger.info("dq_findings updated: %d statement(s) applied", len(ops))
 
 
 # ============================================================
-# phase 2 — AI fix suggestions (Sonnet, grounded, batch) → details
+# phase 2 — AI fix suggestions (Sonnet, grounded) → details
 # ============================================================
 
 SYSTEM = (
@@ -193,91 +241,79 @@ SYSTEM = (
     '{"issue": "<what is wrong, one phrase>", "suggested_postcode": "<correct postcode>", '
     '"suggested_address": "<full address>", "description": "<one concise sentence>"}'
 )
+TOOLS = [{"type": "web_search_20260209", "name": "web_search"},
+         {"type": "web_fetch_20260209", "name": "web_fetch"}]
+
+
+def _ask(client, user: str):
+    """One grounded Sonnet call; resume through server-tool pauses."""
+    messages = [{"role": "user", "content": user}]
+    for _ in range(5):
+        resp = client.messages.create(
+            model=AI_MODEL, max_tokens=AI_MAX_TOKENS, thinking={"type": "adaptive"},
+            system=SYSTEM, tools=TOOLS, messages=messages,
+        )
+        if resp.stop_reason != "pause_turn":
+            return resp
+        messages = messages + [{"role": "assistant", "content": resp.content}]
+    return resp
 
 
 def suggest_fixes():
     import anthropic
-    from anthropic.types.message_create_params import MessageCreateParamsNonStreaming
-    from anthropic.types.messages.batch_create_params import Request
 
-    pending = spark.sql(f"""
+    if not os.getenv("ANTHROPIC_API_KEY"):
+        logger.warning("ANTHROPIC_API_KEY not set — skipping AI suggestions "
+                       "(deterministic findings already written). Set it in .env to enable, "
+                       "or pass --skip-ai to silence this.")
+        return
+
+    pending = _query(f"""
         SELECT f.entity_id AS cp_id, f.details AS details, cp.latitude, cp.longitude
         FROM {DQ_FINDINGS_TABLE} f
-        LEFT JOIN (SELECT cp_id, first(latitude) AS latitude, first(longitude) AS longitude
+        LEFT JOIN (SELECT cp_id, first(latitude, true) AS latitude, first(longitude, true) AS longitude
                    FROM {SILVER_TABLE} GROUP BY cp_id) cp ON f.entity_id = cp.cp_id
-        WHERE f.check_name = '{CHECK_NAME}' AND f.status = 'open'
+        WHERE f.check_name = :cn AND f.status = 'open'
           AND get_json_object(f.details, '$.suggested_postcode') IS NULL
-    """).toPandas()
+    """, {"cn": CHECK_NAME})
 
     if pending.empty:
         logger.info("No open findings need an AI suggestion")
         return
 
-    details_by_cp = {str(r.cp_id): json.loads(r.details) for r in pending.itertuples()}
-
     client = anthropic.Anthropic()  # reads ANTHROPIC_API_KEY
-    batch_requests = []
+    ops: list[tuple[str, dict]] = []
     for r in pending.itertuples():
-        d = details_by_cp[str(r.cp_id)]
+        d = json.loads(r.details)
         user = (f"Site name: {d.get('site_name')}\nPostcode on record: {d.get('feed_postcode')}\n"
                 f"Postcode from coordinates: {d.get('coord_postcode')}\n"
                 f"Coordinates: {r.latitude}, {r.longitude}")
-        batch_requests.append(Request(
-            custom_id=str(r.cp_id),
-            params=MessageCreateParamsNonStreaming(
-                model=AI_MODEL,
-                max_tokens=1500,
-                thinking={"type": "adaptive"},
-                system=SYSTEM,
-                tools=[{"type": "web_search_20260209", "name": "web_search"},
-                       {"type": "web_fetch_20260209", "name": "web_fetch"}],
-                messages=[{"role": "user", "content": user}],
-            ),
-        ))
-
-    batch = client.messages.batches.create(requests=batch_requests)
-    logger.info("Submitted batch %s for %d findings", batch.id, len(batch_requests))
-
-    waited = 0
-    while client.messages.batches.retrieve(batch.id).processing_status != "ended":
-        if waited >= BATCH_MAX_WAIT_SECONDS:
-            logger.warning("Batch %s not finished after %ds — rerun to collect", batch.id, waited)
-            return
-        time.sleep(BATCH_POLL_SECONDS)
-        waited += BATCH_POLL_SECONDS
-
-    rows = []
-    for result in client.messages.batches.results(batch.id):
-        if result.result.type != "succeeded":
-            logger.warning("cp_id %s: batch result %s", result.custom_id, result.result.type)
+        try:
+            resp = _ask(client, user)
+        except anthropic.APIError as e:  # rate limit / network / server — skip this one
+            logger.warning("cp_id %s: Anthropic call failed (%s) — skipping", r.cp_id, e)
             continue
-        data = _extract_json(result.result.message)
+
+        data = _extract_json(resp)
         if not data:
-            logger.warning("cp_id %s: could not parse JSON from response", result.custom_id)
+            logger.warning("cp_id %s: could not parse JSON (stop_reason=%s)", r.cp_id, resp.stop_reason)
             continue
-        d = details_by_cp.get(str(result.custom_id), {})
+
         d.update({
             "issue": data.get("issue"),
             "suggested_postcode": data.get("suggested_postcode"),
             "suggested_address": data.get("suggested_address"),
             "description": data.get("description"),
             "ai_model": AI_MODEL,
-            "request_id": result.result.message.id,
+            "request_id": resp.id,
         })
-        rows.append({"check_name": CHECK_NAME, "entity_id": str(result.custom_id), "details": json.dumps(d)})
+        ops.append((
+            f"UPDATE {DQ_FINDINGS_TABLE} SET details=:details WHERE check_name=:cn AND entity_id=:eid",
+            {"details": json.dumps(d), "cn": CHECK_NAME, "eid": str(r.cp_id)},
+        ))
 
-    if not rows:
-        logger.info("No parseable suggestions produced")
-        return
-
-    spark.createDataFrame(rows, schema="check_name string, entity_id string, details string") \
-         .createOrReplaceTempView("dq_suggestions")
-    spark.sql(f"""
-        MERGE INTO {DQ_FINDINGS_TABLE} t
-        USING dq_suggestions s ON t.check_name = s.check_name AND t.entity_id = s.entity_id
-        WHEN MATCHED THEN UPDATE SET t.details = s.details
-    """)
-    logger.info("Merged %d AI suggestions into dq_findings.details", len(rows))
+    _execute(ops)
+    logger.info("Merged %d/%d AI suggestion(s) into dq_findings.details", len(ops), len(pending))
 
 
 def main():

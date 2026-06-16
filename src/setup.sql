@@ -128,18 +128,10 @@ USING (
 ON t.area_code = s.area_code
 WHEN NOT MATCHED THEN INSERT (area_code, area_name) VALUES (s.area_code, s.area_name);
 
--- Curated, human-approved postcode corrections. Applied fix-on-read by build_charge_points.py
--- (Bronze stays immutable). One row per charge point.
-CREATE TABLE IF NOT EXISTS chargepoint_analysis.reference.postcode_overrides (
-    cp_id               STRING    NOT NULL  COMMENT 'Charge point (EVSE) identifier',
-    corrected_postcode  STRING    NOT NULL  COMMENT 'Approved correct postcode',
-    reason              STRING              COMMENT 'Why the feed value was wrong',
-    corrected_by        STRING              COMMENT 'Who approved the correction',
-    corrected_at        TIMESTAMP           COMMENT 'When the correction was approved (UTC)',
-    CONSTRAINT postcode_overrides_pk PRIMARY KEY (cp_id)
-)
-USING DELTA
-COMMENT 'Human-approved postcode corrections — applied fix-on-read when building Silver.';
+-- NOTE: postcode corrections are NOT a table. They are a curated in-code mapping
+-- (POSTCODE_OVERRIDES in build_charge_points.py), applied fix-on-read when building Silver.
+-- At ≤ a few hand-approved entries, a versioned dict (git history = audit trail) is more
+-- proportionate than a Delta table. Bronze stays immutable either way.
 
 -- Generic data-quality findings register. Every pipeline check writes here (one producer
 -- today: postcode triangulation). Fixed columns stay thin; check-specific payload lives in

@@ -43,7 +43,11 @@ logger = logging.getLogger(__name__)
 
 BRONZE_PATH = os.getenv("LOCATIONS_VOLUME_PATH", "/Volumes/chargepoint_analysis/bronze/locations")
 SILVER_TABLE = os.getenv("SILVER_CP_TABLE", "chargepoint_analysis.silver.charge_points")
-OVERRIDES_TABLE = os.getenv("POSTCODE_OVERRIDES_TABLE", "chargepoint_analysis.reference.postcode_overrides")
+# Curated, human-approved postcode corrections: cp_id → correct postcode. Applied fix-on-read
+# (Bronze stays immutable). Hand-maintained — the git commit is the audit trail (who/when/why).
+POSTCODE_OVERRIDES = {
+    # "52118": "ML11 8RP",  # The State Hospital, Carstairs — feed typo M11 → ML11
+}
 
 POWER_TYPE_MAP = {"AC_1_PHASE": "AC", "AC_2_PHASE": "AC", "AC_3_PHASE": "AC", "DC": "DC"}
 MIN_EXPECTED_EVSES = int(os.getenv("MIN_EXPECTED_EVSES", "1000"))
@@ -122,27 +126,21 @@ def _flatten(locations: list) -> pd.DataFrame:
 
 
 def _apply_overrides(sdf):
-    """Fix-on-read: replace the feed postcode with an approved override where one exists.
+    """Fix-on-read: replace the feed postcode with a curated override where one exists.
 
-    Deterministic join — Bronze is never mutated. Empty/absent overrides table = no-op.
+    Deterministic, in-code mapping — Bronze is never mutated. Empty mapping = no-op
+    (postcode_source already 'feed').
     """
-    try:
-        overrides = spark.table(OVERRIDES_TABLE).select("cp_id", "corrected_postcode")
-    except Exception as e:
-        logger.warning("Overrides table %s unavailable (%s) — keeping all feed postcodes",
-                       OVERRIDES_TABLE, e)
+    if not POSTCODE_OVERRIDES:
         return sdf
 
+    corrected = F.create_map([F.lit(x) for kv in POSTCODE_OVERRIDES.items() for x in kv])[F.col("cp_id")]
     out = (
-        sdf.join(F.broadcast(overrides), "cp_id", "left")
-        .withColumn("postcode", F.coalesce(F.col("corrected_postcode"), F.col("postcode")))
+        sdf.withColumn("postcode", F.coalesce(corrected, F.col("postcode")))
         .withColumn("postcode_source",
-                    F.when(F.col("corrected_postcode").isNotNull(), F.lit("override"))
-                     .otherwise(F.lit("feed")))
-        .drop("corrected_postcode")
+                    F.when(corrected.isNotNull(), F.lit("override")).otherwise(F.lit("feed")))
     )
-    n_override = out.filter(F.col("postcode_source") == "override").select("cp_id").distinct().count()
-    logger.info("Applied postcode overrides to %d charge point(s)", n_override)
+    logger.info("Applied %d curated postcode override(s)", len(POSTCODE_OVERRIDES))
     return out
 
 
