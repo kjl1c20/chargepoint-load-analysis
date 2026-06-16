@@ -55,7 +55,7 @@ POSTCODE_OVERRIDES = {
 }
 # Curated coordinate corrections: cp_id → (latitude, longitude).
 COORD_OVERRIDES = {
-    # "12345": (55.066793, -3.169327),
+    "53143": (55.066793, -3.169327),
 }
 
 POWER_TYPE_MAP = {"AC_1_PHASE": "AC", "AC_2_PHASE": "AC", "AC_3_PHASE": "AC", "DC": "DC"}
