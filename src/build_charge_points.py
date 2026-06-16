@@ -46,7 +46,11 @@ SILVER_TABLE = os.getenv("SILVER_CP_TABLE", "chargepoint_analysis.silver.charge_
 # Curated, human-approved postcode corrections: cp_id → correct postcode. Applied fix-on-read
 # (Bronze stays immutable). Hand-maintained — the git commit is the audit trail (who/when/why).
 POSTCODE_OVERRIDES = {
-    # "52118": "ML11 8RP",  # The State Hospital, Carstairs — feed typo M11 → ML11
+    "61203": "ML11 8RP",  # NHS State Hospital Visitors Car Park
+    "61204": "ML11 8RP",  # NHS State Hospital Visitors Car Park
+    "61205": "ML11 8RP",  # NHS State Hospital Visitors Car Park
+    "61206": "ML11 8RP",  # NHS State Hospital Visitors Car Park
+    "61691": "FK10 4LD"   # Devonway
 }
 
 POWER_TYPE_MAP = {"AC_1_PHASE": "AC", "AC_2_PHASE": "AC", "AC_3_PHASE": "AC", "DC": "DC"}
