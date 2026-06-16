@@ -2,6 +2,7 @@ python-dotenv
 pandas
 streamlit
 plotly
+pydeck
 folium
 streamlit-folium
 ipykernel
@@ -14,4 +15,4 @@ openpyxl
 beautifulsoup4
 python-dateutil
 tenacity
-databricks-sdk
+databricks-sql-connector
