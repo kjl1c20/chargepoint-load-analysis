@@ -14,8 +14,8 @@ Each charge point has three location signals; the odd one out is the error:
 
 `dq_postcodes.py` flags anomalies deterministically (A1 vs A2 vs the 16-area Scottish
 allowlist) into the generic register `reference.dq_findings`, then a Claude Sonnet batch
-merges a suggested fix into each finding's `details` JSON. A human approves the fix into
-`reference.postcode_overrides`, which `build_charge_points.py` applies on the next rebuild.
+merges a suggested fix into each finding's `details` JSON. A human approves the fix into the
+`POSTCODE_OVERRIDES` mapping in `build_charge_points.py`, applied on the next rebuild.
 
 `dq_findings` is **check-agnostic**: fixed columns (`check_name`, `entity_id`, `message`,
 `status`, timestamps) plus a `details` JSON for check-specific fields. Postcode findings use
@@ -24,13 +24,19 @@ merges a suggested fix into each finding's `details` JSON. A human approves the 
 ## Pipeline order
 
 ```
-setup.sql                         # once — creates reference schema + tables (idempotent)
-build_charge_points.py            # Silver charge_points (applies any approved overrides)
-dq_postcodes.py [--skip-ai]       # flag anomalies → dq_findings; --skip-ai skips the AI phase
+setup.sql                         # once — creates reference schema + tables (idempotent)  [Databricks]
+build_charge_points.py            # Silver charge_points (applies any approved overrides)   [Databricks]
+dq_postcodes.py [--skip-ai]       # flag anomalies → dq_findings; --skip-ai skips the AI     [LOCAL]
    → human review (below)
-build_charge_points.py            # re-run: approved overrides now flow into Silver
-site_pressure.py                  # Gold reflects corrected postcode_area
+build_charge_points.py            # re-run: approved overrides now flow into Silver          [Databricks]
+site_pressure.py                  # Gold reflects corrected postcode_area                    [Databricks]
 ```
+
+> **`dq_postcodes.py` runs locally, not on Databricks.** Serverless compute blocks outbound
+> calls to postcodes.io and api.anthropic.com, so this job runs on your machine and talks to
+> Databricks over `databricks-sql-connector` (same as the dashboard). It needs in `.env`:
+> `DATABRICKS_SERVER_HOSTNAME` (or `DATABRICKS_HOST`), `DATABRICKS_HTTP_PATH`, `DATABRICKS_TOKEN`,
+> and — for the AI phase — `ANTHROPIC_API_KEY`. Run: `poetry run python src/dq_postcodes.py [--skip-ai]`.
 
 ## Reviewing and approving (the human step)
 
@@ -50,11 +56,15 @@ site_pressure.py                  # Gold reflects corrected postcode_area
    `verdict` is one of: `postcode_not_scottish`, `area_mismatch`, `postcode_missing`.
    The AI suggestion is a *proposal* — sanity-check it before approving.
 
-2. **Approve** — record the correction (the finding auto-resolves on the next flag run):
-   ```sql
-   INSERT INTO chargepoint_analysis.reference.postcode_overrides
-   VALUES ('<cp_id>', '<correct_postcode>', '<reason>', '<your_name>', current_timestamp());
+2. **Approve** — add the correction to the curated mapping `POSTCODE_OVERRIDES` in
+   `src/build_charge_points.py` and commit (the git commit is the audit trail — who/when/why):
+   ```python
+   POSTCODE_OVERRIDES = {
+       "<cp_id>": "<correct_postcode>",  # <reason>
+   }
    ```
+   The finding auto-resolves on the next `dq_postcodes.py` run once the corrected postcode
+   flows into Silver.
 
 3. **Dismiss** a false positive (feed was actually fine — keeps it from re-opening):
    ```sql
