@@ -341,22 +341,50 @@ def map_and_detail():
             "Site", option_keys, format_func=lambda k: name_by_key.get(k, k), key=sitebox_key,
         )
         sel = mp[mp["site_key"] == selected_key]
+        show_all = st.toggle("Show all Scotland", value=False)
 
         # Render frame: per-point OrRd colour + pre-formatted tooltip fields (deck.gl tooltips
         # can't format numbers, so we format them here).
-        mp_r = mp.copy()
-        mp_r["fill_color"] = mp_r["pressure_score"].apply(lambda v: _orrd_rgb(v) + [200])
-        mp_r["score_disp"] = mp_r["pressure_score"].map(lambda v: f"{v:.3f}" if pd.notna(v) else "—")
-        mp_r["sat_disp"] = mp_r["saturation_rate"].map(lambda v: f"{v * 100:.1f}%" if pd.notna(v) else "—")
-        mp_r["util_disp"] = mp_r["utilisation"].map(lambda v: f"{v * 100:.1f}%" if pd.notna(v) else "—")
+        # show_all uses two layers: a background of all Scotland at reduced size/alpha (OrRd
+        # colour preserved so pressure is readable everywhere), and a foreground of in-region
+        # sites at full size/alpha so the selected area stands out clearly.
+        def _with_disp(df):
+            df = df.copy()
+            df["score_disp"] = df["pressure_score"].map(lambda v: f"{v:.3f}" if pd.notna(v) else "—")
+            df["sat_disp"] = df["saturation_rate"].map(lambda v: f"{v * 100:.1f}%" if pd.notna(v) else "—")
+            df["util_disp"] = df["utilisation"].map(lambda v: f"{v * 100:.1f}%" if pd.notna(v) else "—")
+            return df
 
-        sites_layer = pdk.Layer(
-            "ScatterplotLayer", data=mp_r, id="sites", pickable=True, auto_highlight=True,
+        if show_all:
+            bg_r = _with_disp(
+                site_view[site_view["latitude"].notna() & site_view["longitude"].notna()]
+            )
+            bg_r["fill_color"] = bg_r["pressure_score"].apply(lambda v: _orrd_rgb(v) + [80])
+            map_r = _with_disp(mp)
+            map_r["fill_color"] = map_r["pressure_score"].apply(lambda v: _orrd_rgb(v) + [220])
+            view_lat, view_lon, view_zoom = 57.0, -4.0, 6.0
+        else:
+            bg_r = None
+            map_r = _with_disp(mp)
+            map_r["fill_color"] = map_r["pressure_score"].apply(lambda v: _orrd_rgb(v) + [200])
+            view_lat = float(mp["latitude"].mean())
+            view_lon = float(mp["longitude"].mean())
+            view_zoom = 8.5
+
+        layers = []
+        if show_all:
+            layers.append(pdk.Layer(
+                "ScatterplotLayer", data=bg_r, id="sites_bg", pickable=True, auto_highlight=False,
+                get_position=["longitude", "latitude"], get_fill_color="fill_color",
+                get_radius=80, radius_min_pixels=3, radius_max_pixels=10,
+                stroked=False,
+            ))
+        layers.append(pdk.Layer(
+            "ScatterplotLayer", data=map_r, id="sites", pickable=True, auto_highlight=True,
             get_position=["longitude", "latitude"], get_fill_color="fill_color",
             get_radius=120, radius_min_pixels=6, radius_max_pixels=16,
-            stroked=True, get_line_color=[255, 255, 255], line_width_min_pixels=0.5,
-        )
-        layers = [sites_layer]
+            stroked=True, get_line_color=[0, 0, 0], line_width_min_pixels=1,
+        ))
         if not sel.empty:  # real teardrop pin on the selected site (deck.gl marker atlas)
             layers.append(pdk.Layer(
                 "IconLayer", data=sel.assign(icon="marker"), get_icon="icon",
@@ -368,13 +396,11 @@ def map_and_detail():
         deck = pdk.Deck(
             layers=layers, map_provider="carto", map_style=MAP_STYLE,
             initial_view_state=pdk.ViewState(
-                latitude=float(mp["latitude"].mean()),
-                longitude=float(mp["longitude"].mean()), zoom=8.5),
+                latitude=view_lat, longitude=view_lon, zoom=view_zoom),
             tooltip={
                 "html": (
                     "<b>{site_name}</b> (Rank {pressure_rank})<br/>"
                     "{postcode}<br/>"
-                    "Pressure score: {score_disp}<br/>"
                     "Saturation rate: {sat_disp}<br/>"
                     "Utilisation: {util_disp}<br/>"
                     "{n_charge_points} charge point(s) · {n_connectors} connectors"
@@ -384,7 +410,13 @@ def map_and_detail():
         )
         st.pydeck_chart(deck, use_container_width=True, height=640,  # native trackpad/scroll zoom
                         on_select="rerun", selection_mode="single-object", key="pressure_map")
-        st.caption(f"{len(mp):,} sites in {region} — {AREA_NAMES.get(region, region)}.")
+        if show_all:
+            st.caption(
+                f"{len(map_r):,} sites across Scotland · "
+                f"{len(mp):,} highlighted in {region} — {AREA_NAMES.get(region, region)}."
+            )
+        else:
+            st.caption(f"{len(mp):,} sites in {region} — {AREA_NAMES.get(region, region)}.")
 
     site_row = sel.iloc[0] if not sel.empty else None
     # One concurrent fetch shared by both render functions below — avoids firing the same
