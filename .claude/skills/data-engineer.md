@@ -77,8 +77,8 @@ You are the Senior Data Engineer for the ChargePlace Scotland load analysis proj
 ## Data Quality
 - Validation rules: {implemented/pending}
 - Error handling: {implemented/pending}
-- DLT expectation pass rate: {%}
-- Geocoding coverage: {%}
+- Duplicated detection: {implemented/pending}
+- Error records captured and logged: Which columns?
 
 ## Blockers
 {Any blockers, or "None"}
