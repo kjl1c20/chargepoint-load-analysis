@@ -6,14 +6,13 @@ RUN pip install poetry==2.4.1
 
 # Install system dependencies required by the application
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    gcc \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
 # Isolate the virtual environment from the system Python
 ENV POETRY_VIRTUALENVS_CREATE=true
-ENV POETRY_CACHE_DIR=/home/dev/.cache/pypoetry
+ENV POETRY_VIRTUALENVS_IN_PROJECT=true
+ENV POETRY_CACHE_DIR=/tmp/poetry_cache
 
 # Create a non-root user to run the application
 RUN addgroup --system dev && adduser --system --ingroup dev dev
@@ -29,9 +28,6 @@ RUN --mount=type=cache,target=$POETRY_CACHE_DIR \
 
 COPY src ./src
 
-# Create runtime data directories
-RUN mkdir -p data/raw data/processed data/metadata models
-
 # Transfer ownership to the non-root user
 RUN chown -R dev:dev /app
 
@@ -44,5 +40,5 @@ EXPOSE 8501
 HEALTHCHECK --interval=30s --timeout=10s --retries=3 \
     CMD curl --fail http://localhost:8501/_stcore/health || exit 1
 
-ENTRYPOINT ["poetry", "run", "streamlit"]
+ENTRYPOINT ["/app/.venv/bin/streamlit"]
 CMD ["run", "src/dashboard.py", "--server.address=0.0.0.0"]
